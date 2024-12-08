@@ -11,6 +11,7 @@ pub struct State {
     profiles: HashMap<Option<PathBuf>, Profile>,
     selected_profile: Option<PathBuf>,
     src: ConfigSource,
+    //current_epoch: Option<u64>, // type of epoch
 }
 
 impl State {

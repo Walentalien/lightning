@@ -12,7 +12,9 @@ pub mod firewall;
 pub mod home;
 #[cfg(feature = "logger")]
 pub mod logger;
+
 pub mod navigator;
+pub mod network_state;
 pub mod profile;
 pub mod prompt;
 pub mod summary;

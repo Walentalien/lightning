@@ -24,6 +24,7 @@ impl Navigator {
             "Home",
             "Firewall",
             "Profiles",
+            "NetworkState",
             #[cfg(feature = "logger")]
             "Logger",
         ];

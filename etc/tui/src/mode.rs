@@ -11,6 +11,7 @@ pub enum Mode {
     FirewallEdit,
     FirewallForm,
     Logger,
+    NetworkState,
     Profiles,
     ProfilesEdit,
     ProfileForm,
@@ -29,6 +30,7 @@ impl FromStr for Mode {
             #[cfg(feature = "logger")]
             "Logger" => Mode::Logger,
             "Profiles" => Mode::Profiles,
+            "NetworkState" => Mode::NetworkState,
             _ => return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid mode")),
         };
 
