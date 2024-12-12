@@ -1,3 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["src/*"]
+
 [package]
 name = "lightning-tui"
 version = "0.0.0"
@@ -35,10 +39,11 @@ tui-logger = { version = "0.11", optional = true }
 tui-textarea = "0.5"
 unicode-width = "0.1"
 lightning-utils = { path = "../../core/utils" }
+reqwest = "0.11.27"
 
 [dev-dependencies]
 pretty_assertions = "1.4"
-
+reqwest = "0.11.27"
 [features]
 default = []
 logger = ["tui-logger", "socket-logger"]

@@ -7,6 +7,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use super::{Component, Frame};
 use crate::action::Action;
 use crate::config::Config;
+use crate::state::State;
 
 pub struct NetworkState {
     command_tx: Option<UnboundedSender<Action>>,
@@ -63,7 +64,7 @@ impl NetworkState {
             .map(|((((a, d), m), n), i)| format!("{a:5}{d:5}{m:8}{i:2}{n:4}"))
             .collect::<Vec<_>>()
             .join("\n");
-        title.push_str("\n\nUnder Construction");
+        title.push_str("\n\nCurrent epoch will appear here: {}", get_current_epoch());
 
         let logo = logo
             .lines()
@@ -89,6 +90,14 @@ impl Component for NetworkState {
     fn register_config_handler(&mut self, config: Config) -> Result<()> {
         self.config = config;
         Ok(())
+    }
+    fn update(&mut self, action: Action, ctx: &mut State) -> Result<Option<Action>> {
+        match action {
+            Action::Resize => {
+
+            }
+        }
+
     }
 
     fn draw(&mut self, f: &mut Frame<'_>, area: Rect) -> Result<()> {
@@ -116,4 +125,5 @@ impl Component for NetworkState {
 
         Ok(())
     }
+
 }

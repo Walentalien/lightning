@@ -6,12 +6,22 @@ use lightning_guard::map::{FileRule, PacketFilterRule, Profile};
 use lightning_guard::ConfigSource;
 use log::error;
 
+use reqwest::Client;
+use serde::Deserialize;
 pub struct State {
     filters: Vec<PacketFilterRule>,
     profiles: HashMap<Option<PathBuf>, Profile>,
     selected_profile: Option<PathBuf>,
     src: ConfigSource,
-    //current_epoch: Option<u64>, // type of epoch
+    current_epoch: Option<u64>,
+}
+
+//TODO: Can be optimized using serde::Value
+#[derive(Deserialize)]
+struct Response {
+    jsonrpc: String,
+    result: u64, // Assuming epoch is an integer
+    id: u64,
 }
 
 impl State {
@@ -21,6 +31,7 @@ impl State {
             profiles: HashMap::new(),
             selected_profile: None,
             src,
+            current_epoch: None,
         }
     }
 
@@ -60,6 +71,44 @@ impl State {
             .map(|p| (p.name.clone(), p))
             .collect();
         Ok(())
+    }
+
+
+
+
+    pub async fn write_current_epoch(&mut self) -> Result<()> {
+        // Define the endpoint URL
+        let url = "http://my_id_placeholder";
+
+        // Define the JSON payload
+        let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "flk_get_epoch",
+        "params": [],
+        "id": 1
+    });
+
+        // Create an HTTP client
+        let client = Client::new();
+
+        // Send the POST request
+        let response = client
+            .post(url)
+            .json(&payload)
+            .send()
+            .await?;
+
+        // Parse the JSON response
+        let response_json: Response = response.json().await?;
+
+        // Extract the epoch value
+        self.current_epoch = Some(response_json.result);
+
+       Ok(())
+    }
+
+    pub fn get_epoch(&self) -> u64 {
+        self.current_epoch.unwrap_or(0)
     }
 
     pub fn add_profile(&mut self, profiles: Profile) {

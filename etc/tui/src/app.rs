@@ -94,6 +94,7 @@ impl App {
     async fn load_state(&mut self) -> Result<()> {
         self.state.load_profiles().await?;
         self.state.load_filters().await?;
+        self.state.write_current_epoch().await?;
         Ok(())
     }
 
