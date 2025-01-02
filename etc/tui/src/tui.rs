@@ -41,6 +41,7 @@ pub enum Event {
     Key(KeyEvent),
     Mouse(MouseEvent),
     Resize(u16, u16),
+    UpdateNetworkView,
 }
 
 pub struct Tui {
@@ -100,6 +101,7 @@ impl Tui {
 
     pub fn start(&mut self) {
         let tick_delay = Duration::from_secs_f64(1.0 / self.tick_rate);
+        let read_network_duration = Duration::from_secs_f64(300.0); // TODO define const
         let render_delay = Duration::from_secs_f64(1.0 / self.frame_rate);
         self.cancel();
         self.cancellation_token = CancellationToken::new();
@@ -108,11 +110,13 @@ impl Tui {
         self.task = tokio::spawn(async move {
             let mut reader = crossterm::event::EventStream::new();
             let mut tick_interval = tokio::time::interval(tick_delay);
+            let mut read_network_interval = tokio::time::interval(read_network_duration);
             let mut render_interval = tokio::time::interval(render_delay);
             _event_tx.send(Event::Init).unwrap();
             loop {
                 let tick_delay = tick_interval.tick();
                 let render_delay = render_interval.tick();
+                let read_network_duration = read_network_interval.tick();
                 let crossterm_event = reader.next().fuse();
                 tokio::select! {
                   _ = _cancellation_token.cancelled() => {
@@ -150,13 +154,19 @@ impl Tui {
                       None => {},
                     }
                   },
-                  _ = tick_delay => {
+                  _ = tick_delay => {                                       //TODO add new Trigger event
                       _event_tx.send(Event::Tick).unwrap();
+                        //_event_tx.send(Event::UpdateNetworkView).unwrap();
                   },
                   _ = render_delay => {
                       _event_tx.send(Event::Render).unwrap();
                   },
+                    _ = read_network_duration => {
+                        _event_tx.send(Event::UpdateNetworkView).unwrap();
+                    }
+
                 }
+
             }
         });
     }

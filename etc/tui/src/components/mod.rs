@@ -14,7 +14,7 @@ pub mod home;
 pub mod logger;
 
 pub mod navigator;
-pub mod network_state;
+pub mod network_view;
 pub mod profile;
 pub mod prompt;
 pub mod summary;

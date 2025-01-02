@@ -15,7 +15,7 @@ use crate::components::home::Home;
 #[cfg(feature = "logger")]
 use crate::components::logger::Logger;
 use crate::components::navigator::Navigator;
-use crate::components::network_state::NetworkState;
+use crate::components::network_view::NetworkView;
 use crate::components::profile::{Profile, ProfileForm, ProfileView, RuleForm};
 use crate::components::prompt::Prompt;
 use crate::components::summary::Summary;
@@ -43,7 +43,7 @@ pub struct App {
     pub prompt: Prompt,
     pub navigator: Navigator,
     pub firewall: FireWall,
-    pub network_state: NetworkState,
+    pub network_view: NetworkView,
     pub profiles: Profile,
     pub profile_view: ProfileView,
     pub profile_form: ProfileForm,
@@ -58,7 +58,7 @@ impl App {
         let mode = Mode::Home;
         let home = Home::new();
         let firewall = FireWall::new();
-        let network_state = NetworkState::new(); // to do
+        let network_view = NetworkView::new();
         #[cfg(feature = "logger")]
         let logger = Logger::new();
         let summary = Summary::new();
@@ -70,7 +70,7 @@ impl App {
             tick_rate,
             frame_rate,
             home,
-            network_state,
+            network_view,
             #[cfg(feature = "logger")]
             logger,
             summary,
@@ -105,7 +105,7 @@ impl App {
             Mode::Firewall => self.firewall.update(action.clone(), ctx)?,
             Mode::FirewallEdit => self.firewall.update(action.clone(), ctx)?,
             Mode::FirewallForm => self.filter_form.update(action.clone(), ctx)?,
-            Mode::NetworkState => self.network_state.update(action.clone(), ctx)?,
+            Mode::NetworkView => self.network_view.update(action.clone(), ctx)?,
             Mode::Profiles => self.profiles.update(action.clone(), ctx)?,
             Mode::ProfilesEdit => self.profiles.update(action.clone(), ctx)?,
             Mode::ProfileView => self.profile_view.update(action.clone(), ctx)?,
@@ -132,7 +132,7 @@ impl App {
             Mode::Firewall => self.firewall.handle_events(Some(event), ctx),
             Mode::FirewallEdit => self.firewall.handle_events(Some(event), ctx),
             Mode::FirewallForm => self.filter_form.handle_events(Some(event), ctx),
-            Mode::NetworkState => self.network_state.handle_events(Some(event), ctx),
+            Mode::NetworkView => self.network_view.handle_events(Some(event), ctx),
             Mode::Profiles => self.profiles.handle_events(Some(event), ctx),
             Mode::ProfilesEdit => self.profiles.handle_events(Some(event), ctx),
             Mode::ProfileView => self.profile_view.handle_events(Some(event), ctx),
@@ -208,8 +208,8 @@ impl App {
             Mode::Logger => {
                 self.home.draw(f, content[0])?;
             },
-            Mode::NetworkState => {
-                self.network_state.draw(f, content[0])?;
+            Mode::NetworkView => {
+                self.network_view.draw(f, content[0])?;
             },
         }
 
@@ -251,7 +251,6 @@ impl App {
         self.home.register_action_handler(action_tx.clone())?;
         self.home.register_config_handler(self.config.clone())?;
         self.home.init(tui.size()?)?; // TODO : Update deprecated method , in different PR.
-
         self.summary.register_action_handler(action_tx.clone())?;
         self.summary.register_config_handler(self.config.clone())?;
         self.summary.init(tui.size()?)?;
@@ -271,10 +270,11 @@ impl App {
         self.firewall.register_config_handler(self.config.clone())?;
         self.firewall.init(tui.size()?)?;
 
-        self.network_state
+        self.network_view
             .register_action_handler(action_tx.clone())?;
-        self.network_state.init(tui.size()?)?;
-        self.network_state.init(tui.size()?)?;
+        self.network_view.register_config_handler(self.config.clone())?;
+        self.network_view.init(tui.size()?)?;
+        self.network_view.set_curr_epoch( self.state.get_epoch());
 
         // If it's an error, there is no file and thus there is nothing to do.
         self.state.load_filters().await?;
@@ -296,7 +296,8 @@ impl App {
         loop {
             if let Some(e) = tui.next().await {
                 match e {
-                    tui::Event::Quit => action_tx.send(Action::Quit)?,
+                    tui::Event::UpdateNetworkView =>action_tx.send(Action::UpdateNetworkView)?,
+                    tui::Event::Quit => action_tx.send(Action::Quit)?, // TODO: Add new Event readig from hte state current epoch and update NetworkState
                     tui::Event::Tick => action_tx.send(Action::Tick)?,
                     tui::Event::Render => action_tx.send(Action::Render)?,
                     tui::Event::Resize(x, y) => action_tx.send(Action::Resize(x, y))?,
@@ -332,7 +333,11 @@ impl App {
                 }
                 match &action {
                     Action::Tick => {
+
                         self.last_tick_key_events.drain(..);
+
+
+
                     },
                     Action::Quit => self.should_quit = true,
                     Action::Suspend => self.should_suspend = true,
@@ -367,6 +372,17 @@ impl App {
                             }
                         })?;
                     },
+                    Action::UpdateNetworkView => {
+                        self.state.write_current_epoch().await?;
+                        tui.draw(|f| {
+                            if let Err(e) = self.draw_components(f, f.size()) {
+                                action_tx
+                                    .send(Action::Error(format!("Failed to draw: {:?}", e)))
+                                    .unwrap();
+                            }
+                        })?;
+
+                   }
                     Action::Error(e) => {
                         self.prompt.new_message(e.clone());
                         tui.draw(|f| {

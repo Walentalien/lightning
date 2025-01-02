@@ -78,7 +78,7 @@ impl State {
 
     pub async fn write_current_epoch(&mut self) -> Result<()> {
         // Define the endpoint URL
-        let url = "http://my_id_placeholder";
+        let url = "http://104.131.168.39:4230/rpc/v0";
 
         // Define the JSON payload
         let payload = serde_json::json!({
