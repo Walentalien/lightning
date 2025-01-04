@@ -95,6 +95,7 @@ impl App {
         self.state.load_profiles().await?;
         self.state.load_filters().await?;
         self.state.write_current_epoch().await?;
+        self.state.write_current_network_info().await?;
         Ok(())
     }
 
@@ -275,6 +276,7 @@ impl App {
         self.network_view.register_config_handler(self.config.clone())?;
         self.network_view.init(tui.size()?)?;
         self.network_view.set_curr_epoch( self.state.get_epoch());
+        self.network_view.set_ethereum_address( self.state.get_ethereum_address() );
 
         // If it's an error, there is no file and thus there is nothing to do.
         self.state.load_filters().await?;
@@ -297,7 +299,7 @@ impl App {
             if let Some(e) = tui.next().await {
                 match e {
                     tui::Event::UpdateNetworkView =>action_tx.send(Action::UpdateNetworkView)?,
-                    tui::Event::Quit => action_tx.send(Action::Quit)?, // TODO: Add new Event readig from hte state current epoch and update NetworkState
+                    tui::Event::Quit => action_tx.send(Action::Quit)?,
                     tui::Event::Tick => action_tx.send(Action::Tick)?,
                     tui::Event::Render => action_tx.send(Action::Render)?,
                     tui::Event::Resize(x, y) => action_tx.send(Action::Resize(x, y))?,
@@ -333,11 +335,7 @@ impl App {
                 }
                 match &action {
                     Action::Tick => {
-
                         self.last_tick_key_events.drain(..);
-
-
-
                     },
                     Action::Quit => self.should_quit = true,
                     Action::Suspend => self.should_suspend = true,

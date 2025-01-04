@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-
 use anyhow::Result;
 use lightning_guard::map::{FileRule, PacketFilterRule, Profile};
 use lightning_guard::ConfigSource;
@@ -14,16 +13,90 @@ pub struct State {
     selected_profile: Option<PathBuf>,
     src: ConfigSource,
     current_epoch: Option<u64>,
+    ownership_info: OwnershipInfo,
+    stake_info: StakeInfo,
+}
+struct OwnershipInfo {
+    owner_address: String,
+    public_keys: PublicKeys,
 }
 
 //TODO: Can be optimized using serde::Value
 #[derive(Deserialize)]
-struct Response {
+struct Response {          //TODO Unify
     jsonrpc: String,
-    result: u64, // Assuming epoch is an integer
+    result: u64,
     id: u64,
 }
+#[derive(Debug, Deserialize)]
+pub struct ApiResponse<T> {
+    pub jsonrpc: String,
+    pub result: Vec<ResultField<T>>,
+    pub id: u64,
+}
+#[derive(Debug, Deserialize)]
+pub struct ApiResponseKeys<T>{
+    pub jsonrpc: String,
+    pub result: T,
+    pub id: u64,
+}
 
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum ResultField<T> {
+    NodeInfo(T),
+    Number(u64),
+}
+#[derive(Debug, Deserialize)]
+struct PublicKeys{
+   node_public_key: String,
+   consensus_public_key:String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NodeInfo {
+    pub owner: String,
+    pub public_key: String,
+    pub consensus_key: String,
+    pub staked_since: u64,
+    pub stake: StakeInfo,
+    pub domain: String,
+    pub worker_domain: String,
+    pub ports: Ports,
+    pub worker_public_key: String,
+    pub participation: String, // Change to bool if it can be deserialized as true/false instead of a string
+    pub nonce: u64,
+}
+
+
+// Stake information structure
+#[derive(Debug, Deserialize)]
+pub struct StakeInfo {
+    pub staked: String,
+    pub stake_locked_until: u64,
+    pub locked: String,
+    pub locked_until: u64,
+}
+
+// Port information structure
+#[derive(Debug, Deserialize)]
+pub struct Ports {
+    pub primary: u16,
+    pub worker: u16,
+    pub mempool: u16,
+    pub rpc: u16,
+    pub pool: u16,
+    pub pinger: u16,
+    pub handshake: HandshakePorts,
+}
+
+// Handshake port structure
+#[derive(Debug, Deserialize)]
+pub struct HandshakePorts {
+    pub http: u16,
+    pub webrtc: u16,
+    pub webtransport: u16,
+}
 impl State {
     pub fn new(src: ConfigSource) -> Self {
         Self {
@@ -32,6 +105,20 @@ impl State {
             selected_profile: None,
             src,
             current_epoch: None,
+            ownership_info: OwnershipInfo {
+                owner_address: "".to_string(),
+                public_keys: PublicKeys {
+                    node_public_key: "".to_string(),
+                    consensus_public_key: "".to_string(),
+                }
+            },
+            stake_info: StakeInfo {
+                staked: "".to_string(),
+                stake_locked_until: 0,
+                locked: "".to_string(),
+                locked_until: 0,
+            },
+
         }
     }
 
@@ -107,8 +194,65 @@ impl State {
        Ok(())
     }
 
+    pub async fn write_current_network_info(&mut self) -> Result<()> {
+
+        let url = "http://104.131.168.39:4230/rpc/v0";
+        let client = reqwest::Client::new();
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "flk_get_public_keys",
+            "params": [],
+            "id": 1, // TODO: Implement requestID logic
+
+        });
+
+        let response = client
+            .post(url)
+            .json(&payload)
+            .send()
+            .await?;
+
+        let response_json: ApiResponseKeys<PublicKeys> = response.json().await?;
+        let mut public_key : String = response_json.result.node_public_key.clone();
+
+        let client = reqwest::Client::new();
+
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "flk_get_node_info_epoch",
+            "params": [public_key],
+            "id": 2,
+        });
+
+        let response = client.post(url).json(&payload).send().await?;
+
+        let api_response: ApiResponse<NodeInfo> = response.json().await?;
+
+        for result in api_response.result {
+            match result{
+                ResultField::NodeInfo(info) => {
+                    self.ownership_info.owner_address = info.owner;
+                    self.ownership_info.public_keys.node_public_key = info.public_key;
+                    self.ownership_info.public_keys.consensus_public_key = info.consensus_key;
+                    self.stake_info.staked = info.stake.staked;
+                    self.stake_info.stake_locked_until = info.stake.stake_locked_until;
+                    self.stake_info.locked = info.stake.locked;
+                    self.stake_info.locked_until = info.stake.locked_until;
+
+                }
+                ResultField::Number(number) => continue,
+            }
+        }
+        Ok(())
+
+    }
+
     pub fn get_epoch(&self) -> u64 {
         self.current_epoch.unwrap_or(0)
+    }
+
+    pub fn get_ethereum_address(&self) -> String {
+        self.ownership_info.owner_address.clone()
     }
 
     pub fn add_profile(&mut self, profiles: Profile) {

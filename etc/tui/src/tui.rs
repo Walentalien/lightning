@@ -154,9 +154,8 @@ impl Tui {
                       None => {},
                     }
                   },
-                  _ = tick_delay => {                                       //TODO add new Trigger event
+                  _ = tick_delay => {
                       _event_tx.send(Event::Tick).unwrap();
-                        //_event_tx.send(Event::UpdateNetworkView).unwrap();
                   },
                   _ = render_delay => {
                       _event_tx.send(Event::Render).unwrap();
