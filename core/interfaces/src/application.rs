@@ -17,6 +17,7 @@ use lightning_types::{
     CommitteeSelectionBeaconReveal,
     Genesis,
     NodeIndex,
+    Nonce,
     ProtocolParamKey,
     ProtocolParamValue,
     StateProofKey,
@@ -24,6 +25,7 @@ use lightning_types::{
     TransactionRequest,
     TxHash,
     Value,
+    WithdrawInfoWithId,
 };
 use merklize::trees::mpt::MptStateProof;
 use merklize::StateRootHash;
@@ -126,8 +128,11 @@ pub trait SyncQueryRunnerInterface: Clone + Send + Sync + 'static {
         selector: impl FnOnce(AccountInfo) -> V,
     ) -> Option<V>;
 
-    /// Query Client Table
+    /// Query Client table for parent account id
     fn client_key_to_account_key(&self, pub_key: &ClientPublicKey) -> Option<EthAddress>;
+
+    /// Query Client table for nonce
+    fn get_client_nonce(&self, pub_key: &ClientPublicKey) -> Nonce;
 
     /// Query Node Table
     /// Returns information about a single node.
@@ -167,6 +172,9 @@ pub trait SyncQueryRunnerInterface: Clone + Send + Sync + 'static {
         CommitteeSelectionBeaconCommit,
         Option<CommitteeSelectionBeaconReveal>,
     )>;
+
+    /// Get the non-revealing nodes from the previous round.
+    fn get_committee_selection_beacon_non_revealing_nodes(&self) -> Vec<NodeIndex>;
 
     /// Query Services Table
     /// Returns the service information for a given [`ServiceId`]
@@ -237,6 +245,9 @@ pub trait SyncQueryRunnerInterface: Clone + Send + Sync + 'static {
 
     // Returns whether the genesis block has been applied.
     fn has_genesis(&self) -> bool;
+
+    /// Returns a list of withdraws
+    fn get_withdraws(&self, paging: WithdrawPagingParams) -> Vec<WithdrawInfoWithId>;
 }
 
 #[derive(Clone, Debug)]
@@ -252,7 +263,7 @@ pub enum ExecutionError {
 }
 
 #[derive(Deserialize, Serialize, schemars::JsonSchema)]
-pub struct PagingParams {
+pub struct NodePagingParams {
     // Since some nodes may be in state without
     // having staked the minimum and if at any point
     // they stake the minimum amount, this would
@@ -261,5 +272,11 @@ pub struct PagingParams {
     // to keep returned results consistent.
     pub ignore_stake: bool,
     pub start: NodeIndex,
+    pub limit: usize,
+}
+
+#[derive(Deserialize, Serialize, schemars::JsonSchema)]
+pub struct WithdrawPagingParams {
+    pub start: u64,
     pub limit: usize,
 }

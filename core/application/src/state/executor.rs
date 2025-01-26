@@ -33,6 +33,7 @@ use lightning_interfaces::types::{
     NodePorts,
     NodeRegistryChange,
     NodeServed,
+    Nonce,
     Participation,
     ProofOfConsensus,
     ProofOfMisbehavior,
@@ -52,6 +53,7 @@ use lightning_interfaces::types::{
     UpdateMethod,
     UpdateRequest,
     Value,
+    WithdrawInfo,
     MAX_MEASUREMENTS_PER_TX,
     MAX_MEASUREMENTS_SUBMIT,
     MAX_UPDATES_CONTENT_REGISTRY,
@@ -59,7 +61,9 @@ use lightning_interfaces::types::{
 use lightning_interfaces::ToDigest;
 use lightning_utils::eth::fleek_contract::FleekContractCalls;
 use lightning_utils::eth::{
+    ApproveClientKeyCall,
     DepositCall,
+    RevokeClientKeyCall,
     StakeCall,
     UnstakeCall,
     WithdrawCall,
@@ -83,7 +87,7 @@ const DEFAULT_REP_QUANTILE: f64 = 0.15;
 /// epochs and 30% is based on the current epoch.
 const REP_EWMA_WEIGHT: f64 = 0.7;
 
-/// If a node responded to less than 10% of pings from its peers, it will set to inactive until it
+/// If a node responded to less than 40% of pings from its peers, it will set to inactive until it
 /// submits an OptIn transaction.
 const MINIMUM_UPTIME: u8 = 40;
 
@@ -103,7 +107,7 @@ lazy_static! {
 pub struct StateExecutor<B: Backend> {
     pub metadata: B::Ref<Metadata, Value>,
     pub account_info: B::Ref<EthAddress, AccountInfo>,
-    pub client_keys: B::Ref<ClientPublicKey, EthAddress>,
+    pub client_keys: B::Ref<ClientPublicKey, (EthAddress, Nonce)>,
     pub node_info: B::Ref<NodeIndex, NodeInfo>,
     pub consensus_key_to_index: B::Ref<ConsensusPublicKey, NodeIndex>,
     pub pub_key_to_index: B::Ref<NodePublicKey, NodeIndex>,
@@ -131,6 +135,7 @@ pub struct StateExecutor<B: Backend> {
         ),
     >,
     pub committee_selection_beacon_non_revealing_node: B::Ref<NodeIndex, ()>,
+    pub withdraws: B::Ref<u64, WithdrawInfo>,
     pub backend: B,
 }
 
@@ -162,6 +167,7 @@ impl<B: Backend> StateExecutor<B> {
             committee_selection_beacon: backend.get_table_reference("committee_selection_beacon"),
             committee_selection_beacon_non_revealing_node: backend
                 .get_table_reference("committee_selection_beacon_non_revealing_node"),
+            withdraws: backend.get_table_reference("withdraws"),
             backend,
         }
     }
@@ -200,6 +206,12 @@ impl<B: Backend> StateExecutor<B> {
                 token,
                 receiving_address,
             } => self.withdraw(txn.payload.sender, receiving_address, amount, token),
+
+            UpdateMethod::Mint {
+                amount,
+                token,
+                receiving_address,
+            } => self.mint(txn.payload.sender, receiving_address, amount, token),
 
             UpdateMethod::Deposit {
                 proof,
@@ -374,7 +386,13 @@ impl<B: Backend> StateExecutor<B> {
                         Some(NodePorts::default()),
                     )
                 },
-                _ => TransactionResponse::Revert(ExecutionError::InvalidStateFunction),
+                Ok(FleekContractCalls::ApproveClientKey(ApproveClientKeyCall { client_key })) => {
+                    self.approve_client_key(sender, client_key.to_vec())
+                },
+                Ok(FleekContractCalls::RevokeClientKey(RevokeClientKeyCall {})) => {
+                    self.revoke_client_key(sender)
+                },
+                Err(_) => TransactionResponse::Revert(ExecutionError::InvalidStateFunction),
             }
         } else {
             // They are trying to transfer FLK
@@ -466,12 +484,102 @@ impl<B: Backend> StateExecutor<B> {
 
     fn withdraw(
         &self,
-        _sender: TransactionSender,
-        _reciever: EthAddress,
-        _amount: HpUfixed<18>,
-        _token: Tokens,
+        sender: TransactionSender,
+        receiver: EthAddress,
+        amount: HpUfixed<18>,
+        token: Tokens,
     ) -> TransactionResponse {
-        TransactionResponse::Revert(ExecutionError::Unimplemented)
+        // This transaction is only callable by AccountOwners and not nodes
+        // So revert if the sender is a node public key
+        let sender = match self.only_account_owner(sender) {
+            Ok(account) => account,
+            Err(e) => return e,
+        };
+        let Some(mut account) = self.account_info.get(&sender) else {
+            return TransactionResponse::Revert(ExecutionError::AccountDoesNotExist);
+        };
+
+        let withdraw_id = match self.metadata.get(&Metadata::WithdrawId) {
+            Some(Value::WithdrawId(epoch)) => epoch,
+            _ => 0,
+        };
+
+        match token {
+            Tokens::FLK => {
+                if amount > account.flk_balance {
+                    return TransactionResponse::Revert(ExecutionError::InsufficientBalance);
+                }
+                account.flk_balance -= amount.clone();
+                self.withdraws.set(
+                    withdraw_id,
+                    WithdrawInfo {
+                        epoch: 0,
+                        token: Tokens::FLK,
+                        receiver,
+                        amount,
+                    },
+                );
+                self.metadata
+                    .set(Metadata::WithdrawId, Value::WithdrawId(withdraw_id + 1));
+            },
+            Tokens::USDC => {
+                // TODO(matthias): make sure that this conversion is safe
+                let amount = amount.convert_precision::<6>();
+                if amount > account.stables_balance {
+                    return TransactionResponse::Revert(ExecutionError::InsufficientBalance);
+                }
+                account.stables_balance -= amount.clone();
+                self.withdraws.set(
+                    withdraw_id,
+                    WithdrawInfo {
+                        epoch: 0,
+                        token: Tokens::USDC,
+                        receiver,
+                        amount: amount.convert_precision::<18>(),
+                    },
+                );
+                self.metadata
+                    .set(Metadata::WithdrawId, Value::WithdrawId(withdraw_id + 1));
+            },
+        }
+
+        self.account_info.set(sender, account);
+        TransactionResponse::Success(ExecutionData::None)
+    }
+
+    // TODO(matthias): temporary until proof of consensus is implemented
+    fn mint(
+        &self,
+        sender: TransactionSender,
+        reciever: EthAddress,
+        amount: HpUfixed<18>,
+        token: Tokens,
+    ) -> TransactionResponse {
+        // This transaction is only callable by AccountOwners and not nodes
+        // So revert if the sender is a node public key
+        let sender = match self.only_account_owner(sender) {
+            Ok(account) => account,
+            Err(e) => return e,
+        };
+
+        let governance_address = match self.metadata.get(&Metadata::GovernanceAddress) {
+            Some(Value::AccountPublicKey(address)) => address,
+            _ => unreachable!("Governance address is missing from state."),
+        };
+        if sender != governance_address {
+            return TransactionResponse::Revert(ExecutionError::OnlyGovernance);
+        }
+
+        let mut account = self.account_info.get(&reciever).unwrap_or_default();
+
+        // Check the token bridged and increment that amount
+        match token {
+            Tokens::FLK => account.flk_balance += amount,
+            Tokens::USDC => account.bandwidth_balance += TryInto::<u128>::try_into(amount).unwrap(),
+        }
+
+        self.account_info.set(reciever, account);
+        TransactionResponse::Success(ExecutionData::None)
     }
 
     fn deposit(
@@ -609,7 +717,7 @@ impl<B: Backend> StateExecutor<B> {
 
                 // Increase the nodes stake by the amount being staked
                 node.stake.staked += amount.clone();
-                self.node_info.set(index, node);
+                self.node_info.set(index, node.clone());
             },
             None => {
                 // If the node doesn't Exist, create it. But check if they provided all the required
@@ -651,10 +759,10 @@ impl<B: Backend> StateExecutor<B> {
                     return TransactionResponse::Revert(ExecutionError::InsufficientNodeDetails);
                 }
             },
-        }
+        };
 
         // decrement the owners balance
-        owner.flk_balance -= amount;
+        owner.flk_balance -= amount.clone();
 
         // Commit changes to the owner
         self.account_info.set(sender, owner);
@@ -758,7 +866,7 @@ impl<B: Backend> StateExecutor<B> {
         // current epoch + lock time todo(dalton): we should be storing unstaked tokens in a
         // list so we can have multiple locked stakes with dif lock times
         node.stake.staked -= amount.clone();
-        node.stake.locked += amount;
+        node.stake.locked += amount.clone();
         node.stake.locked_until = current_epoch + lock_time;
 
         // Save the changed node state.
@@ -769,7 +877,7 @@ impl<B: Backend> StateExecutor<B> {
         // set as Participation::False on epoch change.
         if !self.has_sufficient_unlocked_stake(&node_index) && self.is_participating(&node_index) {
             node.participation = Participation::OptedOut;
-            self.node_info.set(node_index, node);
+            self.node_info.set(node_index, node.clone());
         }
 
         // Return success.
@@ -842,11 +950,9 @@ impl<B: Backend> StateExecutor<B> {
             Ok(account) => account,
             Err(e) => return e,
         };
-        // TODO(matthias): should be panic here or revert? Since the governance address will be
-        // seeded though genesis, this should never happen.
         let governance_address = match self.metadata.get(&Metadata::GovernanceAddress) {
             Some(Value::AccountPublicKey(address)) => address,
-            _ => panic!("Governance address is missing from state."),
+            _ => unreachable!("Governance address is missing from state."),
         };
         if sender != governance_address {
             return TransactionResponse::Revert(ExecutionError::OnlyGovernance);
@@ -864,6 +970,7 @@ impl<B: Backend> StateExecutor<B> {
             Some(mut node_info) => {
                 node_info.participation = Participation::OptedIn;
                 self.node_info.set(index, node_info);
+
                 TransactionResponse::Success(ExecutionData::None)
             },
             None => TransactionResponse::Revert(ExecutionError::NodeDoesNotExist),
@@ -879,6 +986,7 @@ impl<B: Backend> StateExecutor<B> {
             Some(mut node_info) => {
                 node_info.participation = Participation::OptedOut;
                 self.node_info.set(index, node_info);
+
                 TransactionResponse::Success(ExecutionData::None)
             },
             None => TransactionResponse::Revert(ExecutionError::NodeDoesNotExist),
@@ -1040,6 +1148,42 @@ impl<B: Backend> StateExecutor<B> {
             self.uri_to_node.set(uri, providers);
         }
 
+        TransactionResponse::Success(ExecutionData::None)
+    }
+
+    fn approve_client_key(&self, sender: EthAddress, client_key: Vec<u8>) -> TransactionResponse {
+        // Validate client key length
+        let Ok(client_key) = client_key.try_into() else {
+            return TransactionResponse::Revert(ExecutionError::InvalidClientKeyLength);
+        };
+
+        let mut account_info = self.account_info.get(&sender).unwrap_or_default();
+        if account_info.client_key.is_some() {
+            return TransactionResponse::Revert(ExecutionError::DuplicateClientKey);
+        }
+        account_info.client_key = Some(ClientPublicKey(client_key));
+
+        // TODO(oz): technically we should track the client key -> accout key here, but I think
+        //           the pod flow will change to where the client declares the eth account id
+        //           it will use on connection or even per dack. Need to finalize this flow, but
+        //           tracking the logic and ensuring a 1-1 is slightly complex and unused for now.
+
+        // Commit to state and return success
+        self.account_info.set(sender, account_info);
+        TransactionResponse::Success(ExecutionData::None)
+    }
+
+    fn revoke_client_key(&self, sender: EthAddress) -> TransactionResponse {
+        let mut account_info = self.account_info.get(&sender).unwrap_or_default();
+
+        // If no key is stored, revert, otherwise remove it
+        if account_info.client_key.is_none() {
+            return TransactionResponse::Revert(ExecutionError::MissingClientKey);
+        }
+        account_info.client_key = None;
+
+        // Commit to state and return success
+        self.account_info.set(sender, account_info);
         TransactionResponse::Success(ExecutionData::None)
     }
 
@@ -1591,13 +1735,21 @@ impl<B: Backend> StateExecutor<B> {
         }
     }
 
-    fn get_epoch(&self) -> u64 {
+    pub fn get_epoch(&self) -> u64 {
         if let Some(Value::Epoch(epoch)) = self.metadata.get(&Metadata::Epoch) {
             epoch
         } else {
             // unreachable set at genesis
             0
         }
+    }
+
+    pub fn get_committee(&self, epoch: Epoch) -> Committee {
+        self.committee_info.get(&epoch).unwrap_or_default()
+    }
+
+    pub fn get_node_public_key(&self, node_index: &NodeIndex) -> NodePublicKey {
+        self.node_info.get(node_index).unwrap().public_key
     }
 
     fn clear_content_registry(&self, node_index: &NodeIndex) -> Result<(), ExecutionError> {
@@ -1634,6 +1786,7 @@ impl<B: Backend> StateExecutor<B> {
             }
         }
     }
+
     /// Records a node registry change for the current epoch and block number.
     fn record_node_registry_change(
         &self,
@@ -1654,5 +1807,21 @@ impl<B: Backend> StateExecutor<B> {
     /// Returns the current committee.
     pub fn get_current_committee(&self) -> Option<Committee> {
         self.committee_info.get(&self.get_epoch())
+    }
+
+    pub fn get_node_index(&self, node_public_key: &NodePublicKey) -> Option<NodeIndex> {
+        self.pub_key_to_index.get(node_public_key)
+    }
+
+    pub fn get_epoch_era(&self) -> u64 {
+        if let Some(Value::EpochEra(era)) = self.metadata.get(&Metadata::EpochEra) {
+            era
+        } else {
+            0
+        }
+    }
+
+    pub fn set_epoch_era(&self, era: u64) {
+        self.metadata.set(Metadata::EpochEra, Value::EpochEra(era));
     }
 }

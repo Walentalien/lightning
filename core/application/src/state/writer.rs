@@ -36,6 +36,7 @@ use lightning_interfaces::types::{
     TotalServed,
     TxHash,
     Value,
+    WithdrawInfo,
 };
 use lightning_interfaces::SyncQueryRunnerInterface;
 use merklize::StateTree;
@@ -163,7 +164,7 @@ impl ApplicationState<AtomoStorage, DefaultSerdeBackend, ApplicationStateTree> {
         let mut builder = builder
             .with_table::<Metadata, Value>("metadata")
             .with_table::<EthAddress, AccountInfo>("account")
-            .with_table::<ClientPublicKey, EthAddress>("client_keys")
+            .with_table::<ClientPublicKey, (EthAddress, u64)>("client_keys")
             .with_table::<NodeIndex, NodeInfo>("node")
             .with_table::<ConsensusPublicKey, NodeIndex>("consensus_key_to_index")
             .with_table::<NodePublicKey, NodeIndex>("pub_key_to_index")
@@ -188,6 +189,7 @@ impl ApplicationState<AtomoStorage, DefaultSerdeBackend, ApplicationStateTree> {
                 Option<CommitteeSelectionBeaconReveal>,
             )>("committee_selection_beacon")
             .with_table::<NodeIndex, ()>("committee_selection_beacon_non_revealing_node")
+            .with_table::<u64, WithdrawInfo>("withdraws")
             .enable_iter("current_epoch_served")
             .enable_iter("rep_measurements")
             .enable_iter("submitted_rep_measurements")
@@ -200,7 +202,8 @@ impl ApplicationState<AtomoStorage, DefaultSerdeBackend, ApplicationStateTree> {
             .enable_iter("uri_to_node")
             .enable_iter("node_to_uri")
             .enable_iter("committee_selection_beacon")
-            .enable_iter("committee_selection_beacon_non_revealing_node");
+            .enable_iter("committee_selection_beacon_non_revealing_node")
+            .enable_iter("withdraws");
 
         #[cfg(debug_assertions)]
         {
@@ -240,15 +243,7 @@ mod tests {
                     let public_key = secret_key.to_pk();
                     let eth_address: EthAddress = public_key.into();
 
-                    (
-                        eth_address,
-                        AccountInfo {
-                            flk_balance: HpUfixed::<18>::zero(),
-                            stables_balance: HpUfixed::<6>::zero(),
-                            bandwidth_balance: 0,
-                            nonce: 0,
-                        },
-                    )
+                    (eth_address, AccountInfo::default())
                 })
                 .collect::<Vec<_>>();
             let nodes = (0..node_count)

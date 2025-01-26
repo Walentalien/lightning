@@ -15,8 +15,8 @@ use lightning_interfaces::types::{
     ProtocolParamValue,
     Value,
 };
-use lightning_interfaces::PagingParams;
-use types::{CommitteeSelectionBeaconPhase, Participation};
+use lightning_interfaces::NodePagingParams;
+use types::{CommitteeSelectionBeaconPhase, EpochEra, Participation};
 
 pub trait QueryRunnerExt: SyncQueryRunnerInterface {
     /// Returns the chain id
@@ -51,10 +51,19 @@ pub trait QueryRunnerExt: SyncQueryRunnerInterface {
         }
     }
 
+    /// Get current epoch era.
+    fn get_epoch_era(&self) -> EpochEra {
+        match self.get_metadata(&Metadata::EpochEra) {
+            Some(Value::EpochEra(era)) => era,
+            _ => 0,
+        }
+    }
+
     /// Get Current Epoch Info
     /// Returns all the information on the current epoch that Narwhal needs to run
     fn get_epoch_info(&self) -> EpochInfo {
         let epoch = self.get_current_epoch();
+        let epoch_era = self.get_epoch_era();
         // look up current committee
         let committee = self.get_committee_info(&epoch, |c| c).unwrap_or_default();
         EpochInfo {
@@ -64,6 +73,7 @@ pub trait QueryRunnerExt: SyncQueryRunnerInterface {
                 .filter_map(|member| self.get_node_info::<NodeInfo>(member, |n| n))
                 .collect(),
             epoch,
+            epoch_era,
             epoch_end: committee.epoch_end_timestamp,
         }
     }
@@ -146,7 +156,7 @@ pub trait QueryRunnerExt: SyncQueryRunnerInterface {
     /// Returns a full copy of the entire node-registry,
     /// Paging Params - filtering nodes that are still a valid node and have enough stake; Takes
     /// from starting index and specified amount.
-    fn get_node_registry(&self, paging: Option<PagingParams>) -> Vec<NodeInfoWithIndex> {
+    fn get_node_registry(&self, paging: Option<NodePagingParams>) -> Vec<NodeInfoWithIndex> {
         let staking_amount = self.get_staking_amount().into();
 
         self.get_node_table_iter::<Vec<NodeInfoWithIndex>>(|nodes| -> Vec<NodeInfoWithIndex> {
@@ -158,7 +168,7 @@ pub trait QueryRunnerExt: SyncQueryRunnerInterface {
                 None => nodes
                     .filter(|node| node.info.stake.staked >= staking_amount)
                     .collect(),
-                Some(PagingParams {
+                Some(NodePagingParams {
                     ignore_stake,
                     limit,
                     start,

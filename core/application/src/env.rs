@@ -13,7 +13,6 @@ use lightning_interfaces::types::{
     BlockExecutionResponse,
     Committee,
     CommodityTypes,
-    CompressionAlgorithm,
     Epoch,
     ExecutionData,
     Genesis,
@@ -31,13 +30,13 @@ use lightning_interfaces::types::{
     TransactionResponse,
     Value,
 };
+use lightning_interfaces::FileTrustedWriter;
 use lightning_metrics::increment_counter;
 use merklize::hashers::keccak::KeccakHasher;
 use merklize::trees::mpt::MptStateTree;
 use merklize::StateTree;
 use tokio::sync::Mutex;
-use tracing::warn;
-use types::{NodeRegistryChange, NodeRegistryChanges};
+use types::{NodeRegistryChange, NodeRegistryChanges, Nonce};
 
 use crate::config::ApplicationConfig;
 use crate::state::{ApplicationState, QueryRunner};
@@ -69,10 +68,15 @@ impl ApplicationEnv {
         self.inner.query()
     }
 
-    async fn run<F, P>(&mut self, mut block: Block, get_putter: F) -> Result<BlockExecutionResponse>
+    async fn run<C, F, P>(
+        &mut self,
+        mut block: Block,
+        get_blockstore: F,
+    ) -> Result<BlockExecutionResponse>
     where
+        C: NodeComponents,
         F: FnOnce() -> P,
-        P: IncrementalPutInterface,
+        P: BlockstoreInterface<C>,
     {
         let response = self
             .inner
@@ -83,7 +87,10 @@ impl ApplicationEnv {
                 let app = ApplicationState::executor(ctx);
                 let last_block_hash = app.get_block_hash();
 
-                let block_number = app.get_block_number() + 1;
+                let last_block_number = app.get_block_number();
+                let block_number = last_block_number + 1;
+
+                let committee_before_execution = app.get_current_committee();
 
                 // Create block response
                 let mut response = BlockExecutionResponse {
@@ -134,19 +141,28 @@ impl ApplicationEnv {
                 }
 
                 // Update node registry changes on the response if there were any for this block.
-                if let Some(committee) = app.get_current_committee() {
+                let committee = app.get_current_committee();
+                if let Some(committee) = &committee {
                     if let Some(changes) = committee.node_registry_changes.get(&block_number) {
                         response.node_registry_changes = changes.clone();
                     }
                 }
 
+                // If the committee changed, advance to the next epoch era.
+                let has_committee_members_changes =
+                    committee_before_execution.map(|c| c.members) != committee.map(|c| c.members);
+                if has_committee_members_changes {
+                    app.set_epoch_era(app.get_epoch_era() + 1);
+                }
+
                 // Set the last executed block hash and sub dag index
                 // if epoch changed a new committee starts and subdag starts back at 0
-                let (new_sub_dag_index, new_sub_dag_round) = if response.change_epoch {
-                    (0, 0)
-                } else {
-                    (block.sub_dag_index, block.sub_dag_round)
-                };
+                let (new_sub_dag_index, new_sub_dag_round) =
+                    if response.change_epoch || has_committee_members_changes {
+                        (0, 0)
+                    } else {
+                        (block.sub_dag_index, block.sub_dag_round)
+                    };
                 app.set_last_block(response.block_hash, new_sub_dag_index, new_sub_dag_round);
 
                 // Set the new state root on the response.
@@ -173,20 +189,11 @@ impl ApplicationEnv {
             // the application state metadata.
             // This will return `None` only if the InMemory backend is used.
             if let Some((_, checkpoint)) = self.build_checkpoint() {
-                let mut blockstore_put = get_putter();
-                if blockstore_put
-                    .write(checkpoint.as_slice(), CompressionAlgorithm::Uncompressed)
-                    .is_ok()
-                {
-                    if let Ok(state_hash) = blockstore_put.finalize().await {
-                        // Only temporary: write the checkpoint to disk directly.
-                        self.update_last_epoch_hash(state_hash)?;
-                    } else {
-                        warn!("Failed to finalize writing checkpoint to blockstore");
-                    }
-                } else {
-                    warn!("Failed to write checkpoint to blockstore");
-                }
+                let mut file_writer = get_blockstore().file_writer().await?;
+                file_writer.write(checkpoint.as_slice(), true).await?;
+                let state_hash = file_writer.commit().await?;
+                // Only temporary: write the checkpoint to disk directly.
+                self.update_last_epoch_hash(state_hash)?;
             }
         }
 
@@ -208,7 +215,7 @@ impl ApplicationEnv {
 
             let mut node_table = ctx.get_table::<NodeIndex, NodeInfo>("node");
             let mut account_table = ctx.get_table::<EthAddress, AccountInfo>("account");
-            let mut client_table = ctx.get_table::<ClientPublicKey, EthAddress>("client_keys");
+            let mut client_table = ctx.get_table::<ClientPublicKey, (EthAddress, Nonce)>("client_keys");
             let mut service_table = ctx.get_table::<ServiceId, Service>("service");
             let mut param_table = ctx.get_table::<ProtocolParamKey, ProtocolParamValue>("parameter");
             let mut committee_table = ctx.get_table::<Epoch, Committee>("committee");
@@ -230,6 +237,8 @@ impl ApplicationEnv {
 
             metadata_table.insert(Metadata::BlockNumber, Value::BlockNumber(0));
 
+            metadata_table.insert(Metadata::WithdrawId, Value::WithdrawId(0));
+
             metadata_table.insert(
                 Metadata::ProtocolFundAddress,
                 Value::AccountPublicKey(genesis.protocol_fund_address),
@@ -238,6 +247,7 @@ impl ApplicationEnv {
             metadata_table.insert(Metadata::GovernanceAddress,
                 Value::AccountPublicKey(genesis.governance_address));
             let governance_account = AccountInfo {
+                client_key: None,
                 flk_balance: 0u64.into(),
                 stables_balance: 0u64.into(),
                 bandwidth_balance: 0u64.into(),
@@ -334,6 +344,12 @@ impl ApplicationEnv {
                     genesis.committee_selection_beacon_reveal_phase_duration,
                 ),
             );
+            param_table.insert(
+                ProtocolParamKey::CommitteeSelectionBeaconNonRevealSlashAmount,
+                ProtocolParamValue::CommitteeSelectionBeaconNonRevealSlashAmount(
+                    genesis.committee_selection_beacon_non_reveal_slash_amount,
+                ),
+            );
 
             let epoch_end: u64 = genesis.epoch_time + genesis.epoch_start;
             let mut committee_members = Vec::with_capacity(4);
@@ -414,12 +430,13 @@ impl ApplicationEnv {
                     stables_balance: account.stables_balance.into(),
                     bandwidth_balance: account.bandwidth_balance.into(),
                     nonce: 0,
+                    client_key: None,
                 };
                 account_table.insert(account.public_key, info);
             }
 
             for (client_key, address) in genesis.client {
-                client_table.insert(client_key, address);
+                client_table.insert(client_key, (address, 0));
             }
 
             // add commodity prices
@@ -451,6 +468,7 @@ impl ApplicationEnv {
             }
 
             metadata_table.insert(Metadata::Epoch, Value::Epoch(0));
+            metadata_table.insert(Metadata::EpochEra, Value::EpochEra(0));
 
             tracing::info!("Genesis block loaded into application state.");
             Ok(true)
@@ -508,7 +526,7 @@ impl<C: NodeComponents> WorkerTrait for UpdateWorker<C> {
         self.env
             .lock()
             .await
-            .run(req, || self.blockstore.put(None))
+            .run(req, || self.blockstore.clone())
             .await
             .expect("Failed to execute block")
     }

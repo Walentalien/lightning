@@ -27,6 +27,7 @@ use lightning_interfaces::types::{
     NodeIndex,
     NodeInfo,
     NodeServed,
+    Nonce,
     ProtocolParamKey,
     ProtocolParamValue,
     ReportedReputationMeasurements,
@@ -40,8 +41,10 @@ use lightning_interfaces::types::{
     TransactionResponse,
     TxHash,
     Value,
+    WithdrawInfo,
+    WithdrawInfoWithId,
 };
-use lightning_interfaces::SyncQueryRunnerInterface;
+use lightning_interfaces::{SyncQueryRunnerInterface, WithdrawPagingParams};
 use merklize::{StateRootHash, StateTree};
 
 use crate::env::ApplicationStateTree;
@@ -53,7 +56,7 @@ pub struct QueryRunner {
     inner: Atomo<QueryPerm, AtomoStorage>,
     metadata_table: ResolvedTableReference<Metadata, Value>,
     account_table: ResolvedTableReference<EthAddress, AccountInfo>,
-    client_table: ResolvedTableReference<ClientPublicKey, EthAddress>,
+    client_table: ResolvedTableReference<ClientPublicKey, (EthAddress, Nonce)>,
     node_table: ResolvedTableReference<NodeIndex, NodeInfo>,
     pub_key_to_index: ResolvedTableReference<NodePublicKey, NodeIndex>,
     committee_table: ResolvedTableReference<Epoch, Committee>,
@@ -78,7 +81,8 @@ pub struct QueryRunner {
             Option<CommitteeSelectionBeaconReveal>,
         ),
     >,
-    _committee_selection_beacon_non_revealing_node: ResolvedTableReference<NodeIndex, ()>,
+    committee_selection_beacon_non_revealing_node: ResolvedTableReference<NodeIndex, ()>,
+    withdraws: ResolvedTableReference<u64, WithdrawInfo>,
 }
 
 impl QueryRunner {
@@ -97,7 +101,7 @@ impl SyncQueryRunnerInterface for QueryRunner {
         Self {
             metadata_table: atomo.resolve::<Metadata, Value>("metadata"),
             account_table: atomo.resolve::<EthAddress, AccountInfo>("account"),
-            client_table: atomo.resolve::<ClientPublicKey, EthAddress>("client_keys"),
+            client_table: atomo.resolve::<ClientPublicKey, (EthAddress, Nonce)>("client_keys"),
             node_table: atomo.resolve::<NodeIndex, NodeInfo>("node"),
             pub_key_to_index: atomo.resolve::<NodePublicKey, NodeIndex>("pub_key_to_index"),
             committee_table: atomo.resolve::<Epoch, Committee>("committee"),
@@ -120,9 +124,9 @@ impl SyncQueryRunnerInterface for QueryRunner {
                 CommitteeSelectionBeaconCommit,
                 Option<CommitteeSelectionBeaconReveal>,
             )>("committee_selection_beacon"),
-            _committee_selection_beacon_non_revealing_node: atomo
+            committee_selection_beacon_non_revealing_node: atomo
                 .resolve::<NodeIndex, ()>("committee_selection_beacon_non_revealing_node"),
-
+            withdraws: atomo.resolve::<u64, WithdrawInfo>("withdraws"),
             inner: atomo,
         }
     }
@@ -175,9 +179,26 @@ impl SyncQueryRunnerInterface for QueryRunner {
             .map(selector)
     }
 
+    #[inline]
     fn client_key_to_account_key(&self, pub_key: &ClientPublicKey) -> Option<EthAddress> {
+        self.inner.run(|ctx| {
+            self.client_table
+                .get(ctx)
+                .get(pub_key)
+                .map(|(address, _)| address)
+        })
+    }
+
+    #[inline]
+    fn get_client_nonce(&self, pub_key: &ClientPublicKey) -> Nonce {
         self.inner
-            .run(|ctx| self.client_table.get(ctx).get(pub_key))
+            .run(|ctx| {
+                self.client_table
+                    .get(ctx)
+                    .get(pub_key)
+                    .map(|(_, nonce)| nonce)
+            })
+            .unwrap_or_default()
     }
 
     #[inline]
@@ -235,6 +256,18 @@ impl SyncQueryRunnerInterface for QueryRunner {
     )> {
         self.inner
             .run(|ctx| self.committee_selection_beacon.get(ctx).get(node))
+    }
+
+    fn get_committee_selection_beacon_non_revealing_nodes(&self) -> Vec<NodeIndex> {
+        self.inner
+            .run(|ctx| {
+                self.committee_selection_beacon_non_revealing_node
+                    .get(ctx)
+                    .as_map()
+            })
+            .keys()
+            .cloned()
+            .collect()
     }
 
     fn get_service_info(&self, id: &ServiceId) -> Option<Service> {
@@ -359,5 +392,15 @@ impl SyncQueryRunnerInterface for QueryRunner {
     fn has_genesis(&self) -> bool {
         // This is consistent with the logic in `Env::apply_genesis_block`.
         self.get_metadata(&Metadata::Epoch).is_some()
+    }
+
+    fn get_withdraws(&self, paging: WithdrawPagingParams) -> Vec<WithdrawInfoWithId> {
+        self.inner
+            .run(|ctx| self.withdraws.get(ctx).as_map())
+            .into_iter()
+            .map(|(id, info)| WithdrawInfoWithId { id, info })
+            .filter(|info| info.id >= paging.start)
+            .take(paging.limit)
+            .collect()
     }
 }

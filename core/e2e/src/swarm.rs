@@ -27,6 +27,7 @@ use lightning_committee_beacon::{
     CommitteeBeaconDatabaseConfig,
 };
 use lightning_consensus::{Consensus, ConsensusConfig};
+use lightning_fetcher::fetcher::Fetcher;
 use lightning_handshake::config::{HandshakeConfig, TransportConfig};
 use lightning_handshake::handshake::Handshake;
 use lightning_handshake::transports::http::Config;
@@ -34,6 +35,7 @@ use lightning_interfaces::prelude::*;
 use lightning_interfaces::types::{Genesis, GenesisNode, NodePorts, ServiceId, Staking};
 use lightning_keystore::{Keystore, KeystoreConfig};
 use lightning_node_bindings::FullNodeComponents;
+use lightning_origin_ipfs::config::{Config as IPFSOriginConfig, Gateway};
 use lightning_pinger::{Config as PingerConfig, Pinger};
 use lightning_pool::{Config as PoolConfig, PoolProvider};
 use lightning_rep_collector::config::Config as RepAggConfig;
@@ -139,6 +141,24 @@ impl Swarm {
             .collect()
     }
 
+    pub fn get_query_runners(
+        &self,
+    ) -> HashMap<NodePublicKey, c!(FullNodeComponents::ApplicationInterface::SyncExecutor)> {
+        self.nodes
+            .iter()
+            .map(|(&pubkey, node)| (pubkey, node.take_cloned_query_runner()))
+            .collect()
+    }
+
+    pub fn get_query_runner(
+        &self,
+        node: &NodePublicKey,
+    ) -> Option<c!(FullNodeComponents::ApplicationInterface::SyncExecutor)> {
+        self.nodes
+            .get(node)
+            .map(|node| node.take_cloned_query_runner())
+    }
+
     pub fn get_genesis_committee_rpc_addresses(&self) -> HashMap<NodePublicKey, String> {
         self.nodes
             .iter()
@@ -179,8 +199,31 @@ impl Swarm {
         self.nodes.get(node).map(|node| node.take_blockstore())
     }
 
+    pub fn get_resolver(&self, node: &NodePublicKey) -> Option<Resolver<FullNodeComponents>> {
+        self.nodes.get(node).map(|node| node.take_resolver())
+    }
+
+    pub fn get_blockstore_server_socket(
+        &self,
+        node: &NodePublicKey,
+    ) -> Option<BlockstoreServerSocket> {
+        self.nodes
+            .get(node)
+            .map(|node| node.take_blockstore_server_socket())
+    }
+
+    pub fn get_fetcher_socket(&self, node: &NodePublicKey) -> Option<FetcherSocket> {
+        self.nodes
+            .get(node)
+            .map(|node| node.take_fetcher_server_socket())
+    }
+
     pub fn nodes(&self) -> Vec<&ContainerizedNode> {
         self.nodes.values().collect::<Vec<_>>()
+    }
+
+    pub fn get_node_index(&self, node: &NodePublicKey) -> Option<NodeIndex> {
+        self.nodes.get(node).map(|node| node.get_index())
     }
 
     pub fn started_nodes(&self) -> Vec<&ContainerizedNode> {
@@ -276,6 +319,8 @@ pub struct SwarmBuilder {
     services: Vec<ServiceId>,
     ping_interval: Option<Duration>,
     ping_timeout: Option<Duration>,
+    ipfs_gateways: Option<Vec<Gateway>>,
+    chain_id: Option<u32>,
 }
 
 impl SwarmBuilder {
@@ -360,6 +405,16 @@ impl SwarmBuilder {
         self
     }
 
+    pub fn with_ipfs_gateways(mut self, gateways: Vec<Gateway>) -> Self {
+        self.ipfs_gateways = Some(gateways);
+        self
+    }
+
+    pub fn with_chain_id(mut self, chain_id: u32) -> Self {
+        self.chain_id = Some(chain_id);
+        self
+    }
+
     pub fn build(self) -> Swarm {
         let num_nodes = self.num_nodes.expect("Number of nodes must be provided.");
         let directory = self.directory.expect("Directory must be provided.");
@@ -389,13 +444,15 @@ impl SwarmBuilder {
             max_lock_time: 1460,
             supply_at_genesis: 1000000,
             min_num_measurements: 2,
-            chain_id: 59330,
+            chain_id: self.chain_id.unwrap_or(1337),
             reputation_ping_timeout: self.ping_timeout.unwrap_or(Duration::from_millis(1)),
             topology_target_k: 8,
             topology_min_nodes: 16,
 
             committee_selection_beacon_commit_phase_duration: 10,
             committee_selection_beacon_reveal_phase_duration: 10,
+
+            committee_selection_beacon_non_reveal_slash_amount: 1000,
 
             ..Default::default()
         };
@@ -455,6 +512,7 @@ impl SwarmBuilder {
                 self.syncronizer_delta.unwrap_or(Duration::from_secs(300)),
                 &self.services,
                 self.ping_interval,
+                &self.ipfs_gateways,
             );
 
             // Generate and store the node public key.
@@ -566,6 +624,7 @@ fn build_config(
     syncronizer_delta: Duration,
     services: &[ServiceId],
     ping_interval: Option<Duration>,
+    ipfs_gateways: &Option<Vec<Gateway>>,
 ) -> TomlConfigProvider<FullNodeComponents> {
     let config = TomlConfigProvider::<FullNodeComponents>::default();
 
@@ -663,6 +722,16 @@ fn build_config(
         },
         ..Default::default()
     });
+
+    if let Some(gateways) = ipfs_gateways {
+        config.inject::<Fetcher<FullNodeComponents>>(lightning_fetcher::config::Config {
+            ipfs: IPFSOriginConfig {
+                gateways: gateways.clone(),
+                gateway_timeout: Duration::from_millis(5000),
+            },
+            ..Default::default()
+        });
+    }
 
     config
 }

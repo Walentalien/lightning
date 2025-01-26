@@ -13,11 +13,14 @@ use lightning_interfaces::types::{
 use lightning_interfaces::{spawn_worker, BlockstoreServerSocket, FetcherSocket};
 use lightning_metrics::increment_counter;
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinSet;
 use tracing::info;
 use types::{NodeIndex, PeerRequestError};
 
+use self::types::ServerResponse;
 use crate::config::Config;
 use crate::origin::{OriginError, OriginFetcher, OriginRequest};
+use crate::router::Router;
 
 pub(crate) type Uri = Vec<u8>;
 
@@ -31,7 +34,6 @@ impl<C: NodeComponents> Fetcher<C> {
     pub fn new(
         config: &C::ConfigProviderInterface,
         blockstore_server: &C::BlockstoreServerInterface,
-        origin: &C::OriginProviderInterface,
         app: &C::ApplicationInterface,
         fdi::Cloned(blockstore): fdi::Cloned<C::BlockstoreInterface>,
         fdi::Cloned(resolver): fdi::Cloned<C::ResolverInterface>,
@@ -39,13 +41,11 @@ impl<C: NodeComponents> Fetcher<C> {
     ) -> anyhow::Result<Self> {
         let config = config.get::<Self>();
 
+        let router = Router::new(config.clone(), blockstore.clone())?;
+
         let (origin_tx, rx) = mpsc::channel(128);
-        let origin_fetcher = OriginFetcher::<C>::new(
-            config.max_conc_origin_req,
-            origin.get_socket(),
-            rx,
-            resolver.clone(),
-        );
+        let origin_fetcher =
+            OriginFetcher::<C>::new(config.max_conc_origin_req, router, rx, resolver.clone());
 
         let waiter = shutdown.clone();
         let app_query = app.sync_query();
@@ -111,10 +111,16 @@ impl<C: NodeComponents> FetcherWorker<C> {
     /// then falling back to the record's immutable pointer.
     #[inline(always)]
     async fn fetch(&self, hash: Blake3Hash) -> Result<()> {
-        if self.blockstore.get_tree(&hash).await.is_some() {
+        if self
+            .blockstore
+            .get_bucket()
+            .exists(&hash)
+            .await
+            .unwrap_or_default()
+        {
             increment_counter!(
-                "fetcher_from_cache",
-                Some("Counter for content that was already cached locally")
+                "fetcher_from_blockstore",
+                Some("Counter for content that was fetched from the blockstore")
             );
             return Ok(());
         }
@@ -145,10 +151,15 @@ impl<C: NodeComponents> FetcherWorker<C> {
             }
             if let Some(pointer) = pointer {
                 debug_assert_eq!(pointer.hash, hash);
-                if self.blockstore.get_tree(&hash).await.is_some() {
-                    // in case we have the file
+                if self
+                    .blockstore
+                    .get_bucket()
+                    .exists(&hash)
+                    .await
+                    .unwrap_or_default()
+                {
                     increment_counter!(
-                        "fetcher_from_cache",
+                        "fetcher_from_blockstore",
                         Some("Counter for content that was already cached locally")
                     );
                     return Ok(());
@@ -215,6 +226,24 @@ impl<C: NodeComponents> FetcherWorker<C> {
 
     #[inline(always)]
     async fn fetch_from_peer(&self, peer: NodeIndex, hash: Blake3Hash) -> Result<()> {
+        Self::download_hash(&self.blockstore_server_socket, peer, hash).await
+    }
+
+    #[inline(always)]
+    fn download_hash_recurse(
+        blockstore_server_socket: &BlockstoreServerSocket,
+        peer: NodeIndex,
+        hash: Blake3Hash,
+    ) -> futures::future::BoxFuture<Result<()>> {
+        Box::pin(Self::download_hash(blockstore_server_socket, peer, hash))
+    }
+
+    #[inline(always)]
+    async fn download_hash(
+        blockstore_server_socket: &BlockstoreServerSocket,
+        peer: NodeIndex,
+        hash: Blake3Hash,
+    ) -> Result<()> {
         #[inline(always)]
         fn emit_failed_metric() {
             increment_counter!(
@@ -225,18 +254,55 @@ impl<C: NodeComponents> FetcherWorker<C> {
 
         #[inline(always)]
         async fn recv(
-            mut res: tokio::sync::broadcast::Receiver<Result<(), PeerRequestError>>,
-        ) -> Result<()> {
+            mut res: tokio::sync::broadcast::Receiver<Result<ServerResponse, PeerRequestError>>,
+        ) -> Result<ServerResponse> {
             res.recv().await?.map_err(|e| e.into())
         }
 
-        let res = self
-            .blockstore_server_socket
+        let res = blockstore_server_socket
             .run(ServerRequest { hash, peer })
             .await;
+
         match res {
             Ok(res) => match recv(res).await {
-                Ok(_) => {
+                Ok(r) => {
+                    match r {
+                        ServerResponse::EoR => (),
+                        ServerResponse::Continue(hashes) => {
+                            let mut download_hashes = JoinSet::new();
+                            for h in hashes {
+                                let socket = blockstore_server_socket.clone();
+                                download_hashes.spawn(async move {
+                                    Self::download_hash_recurse(&socket, peer, h).await
+                                });
+                            }
+                            while let Some(r) = download_hashes.join_next().await {
+                                match r {
+                                    Ok(Ok(_)) => (),
+                                    Ok(Err(e)) => {
+                                        info!(
+                                            "Failed to receive response from blockstore server {:?}. Error: {:?}",
+                                            peer, e
+                                        );
+                                        emit_failed_metric();
+                                        return Err(e).context(
+                                            "Failed to receive response from blockstore server",
+                                        );
+                                    },
+                                    Err(e) => {
+                                        info!(
+                                            "Failed to receive response from blockstore server {:?}. Error: {:?}",
+                                            peer, e
+                                        );
+                                        emit_failed_metric();
+                                        return Err(e).context(
+                                            "Failed to receive response from blockstore server",
+                                        );
+                                    },
+                                }
+                            }
+                        },
+                    }
                     increment_counter!(
                         "fetcher_from_peer",
                         Some("Counter for content that was fetched from a peer")

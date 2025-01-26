@@ -3,7 +3,7 @@ use fleek_crypto::{EthAddress, TransactionSender};
 use serde::{Deserialize, Serialize};
 
 use super::{Epoch, NodeInfo};
-use crate::{Event, UpdateMethod};
+use crate::{EpochEra, Event, UpdateMethod};
 
 /// Info on a Narwhal epoch
 #[derive(
@@ -14,6 +14,8 @@ pub struct EpochInfo {
     pub committee: Vec<NodeInfo>,
     /// The current epoch number
     pub epoch: Epoch,
+    /// The current epoch era
+    pub epoch_era: EpochEra,
     /// Timestamp when the epoch ends
     pub epoch_end: u64,
 }
@@ -142,6 +144,7 @@ pub enum ExecutionError {
     NotNodeOwner,
     NotCommitteeMember,
     NodeDoesNotExist,
+    AccountDoesNotExist,
     CantSendToYourself,
     AlreadySignaled,
     SubmittedTooManyTransactions,
@@ -162,4 +165,8 @@ pub enum ExecutionError {
     TooManyMeasurements,
     TooManyUpdates,
     TooManyUpdatesForContent,
+    // approve and revoke client key error types
+    InvalidClientKeyLength,
+    DuplicateClientKey,
+    MissingClientKey,
 }

@@ -3,11 +3,11 @@
 use std::collections::BTreeMap;
 
 use ethers::types::{Block as EthersBlock, H256, U64};
-use fleek_crypto::{EthAddress, NodePublicKey};
+use fleek_crypto::{ClientPublicKey, EthAddress, NodePublicKey};
 use hp_fixed::unsigned::HpUfixed;
 use serde::{Deserialize, Serialize};
 
-use crate::{BlockNumber, TransactionReceipt};
+use crate::{BlockNumber, Epoch, Staking, Tokens, TransactionReceipt};
 
 /// Max number of updates allowed in a content registry update transaction.
 pub const MAX_UPDATES_CONTENT_REGISTRY: usize = 100;
@@ -175,6 +175,15 @@ pub type BlockNodeRegistryChanges = Vec<(NodePublicKey, NodeRegistryChange)>;
 pub enum NodeRegistryChange {
     New,
     Removed,
+    Slashed((HpUfixed<18>, Staking, NodeRegistryChangeSlashReason)),
+}
+
+#[rustfmt::skip]
+#[derive(
+    Debug, PartialEq, PartialOrd, Hash, Eq, Ord, Serialize, Deserialize, Clone, schemars::JsonSchema,
+)]
+pub enum NodeRegistryChangeSlashReason {
+    CommitteeBeaconNonReveal,
 }
 
 /// The account info stored per account on the blockchain
@@ -201,4 +210,20 @@ pub struct AccountInfo {
     /// The nonce of the account. Added to each transaction before signed to prevent replays and
     /// enforce ordering
     pub nonce: u64,
+    /// Approved client public keys
+    pub client_key: Option<ClientPublicKey>,
+}
+
+#[derive(Debug, Hash, PartialEq, Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct WithdrawInfo {
+    pub epoch: Epoch,
+    pub token: Tokens,
+    pub receiver: EthAddress,
+    pub amount: HpUfixed<18>,
+}
+
+#[derive(Debug, Hash, PartialEq, Serialize, Deserialize, Clone, schemars::JsonSchema)]
+pub struct WithdrawInfoWithId {
+    pub id: u64,
+    pub info: WithdrawInfo,
 }

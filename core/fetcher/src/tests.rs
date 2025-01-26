@@ -23,7 +23,6 @@ use lightning_interfaces::types::{
 };
 use lightning_node::Node;
 use lightning_notifier::Notifier;
-use lightning_origin_demuxer::{Config as DemuxerOriginConfig, OriginDemuxer};
 use lightning_origin_ipfs::config::{Gateway, Protocol, RequestFormat};
 use lightning_origin_ipfs::Config as IPFSOriginConfig;
 use lightning_pool::{Config as PoolConfig, PoolProvider};
@@ -52,7 +51,6 @@ partial_node_components!(TestBinding {
     ConfigProviderInterface = JsonConfigProvider;
     FetcherInterface = Fetcher<Self>;
     ForwarderInterface = MockForwarder<Self>;
-    OriginProviderInterface = OriginDemuxer<Self>;
     BroadcastInterface = Broadcast<Self>;
     BlockstoreInterface = Blockstore<Self>;
     BlockstoreServerInterface = BlockstoreServer<Self>;
@@ -158,7 +156,8 @@ async fn get_fetchers(
                                     .try_into()
                                     .unwrap(),
                             })
-                            .with::<OriginDemuxer<TestBinding>>(DemuxerOriginConfig {
+                            .with::<Fetcher<TestBinding>>(Config {
+                                max_conc_origin_req: 3,
                                 ipfs: IPFSOriginConfig {
                                     gateways: vec![Gateway {
                                         protocol: Protocol::Http,
@@ -168,9 +167,6 @@ async fn get_fetchers(
                                     gateway_timeout: Duration::from_millis(5000),
                                 },
                                 ..Default::default()
-                            })
-                            .with::<Fetcher<TestBinding>>(Config {
-                                max_conc_origin_req: 3,
                             }),
                     ),
             )

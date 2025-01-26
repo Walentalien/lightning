@@ -8,6 +8,7 @@ use lightning_interfaces::prelude::*;
 use lightning_interfaces::types::{NodePorts, Staking};
 use lightning_node::ContainedNode;
 use lightning_node_bindings::FullNodeComponents;
+use lightning_resolver::Resolver;
 use lightning_rpc::api::FleekApiClient;
 use lightning_rpc::{Rpc, RpcClient};
 use lightning_utils::config::TomlConfigProvider;
@@ -101,10 +102,40 @@ impl ContainerizedNode {
             .get::<<FullNodeComponents as NodeComponents>::SyncronizerInterface>()
     }
 
+    pub fn take_resolver(&self) -> Resolver<FullNodeComponents> {
+        self.node
+            .provider()
+            .get::<<FullNodeComponents as NodeComponents>::ResolverInterface>()
+            .clone()
+    }
+
     pub fn take_blockstore(&self) -> Blockstore<FullNodeComponents> {
         self.node
             .provider()
             .get::<<FullNodeComponents as NodeComponents>::BlockstoreInterface>()
+            .clone()
+    }
+
+    pub fn take_blockstore_server_socket(&self) -> BlockstoreServerSocket {
+        self.node
+            .provider()
+            .get::<<FullNodeComponents as NodeComponents>::BlockstoreServerInterface>()
+            .get_socket()
+    }
+
+    pub fn take_fetcher_server_socket(&self) -> FetcherSocket {
+        self.node
+            .provider()
+            .get::<<FullNodeComponents as NodeComponents>::FetcherInterface>()
+            .get_socket()
+    }
+
+    pub fn take_cloned_query_runner(
+        &self,
+    ) -> c!(FullNodeComponents::ApplicationInterface::SyncExecutor) {
+        self.node
+            .provider()
+            .get::<c!(FullNodeComponents::ApplicationInterface::SyncExecutor)>()
             .clone()
     }
 
