@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use anyhow::Result;
+use config::Value;
 use lightning_guard::map::{FileRule, PacketFilterRule, Profile};
 use lightning_guard::ConfigSource;
 use log::error;
@@ -14,7 +15,11 @@ pub struct State {
     src: ConfigSource,
     current_epoch: Option<u64>,
     ownership_info: OwnershipInfo,
+    participation: String,
+    reputation: String,
+    uptime: String,
     stake_info: StakeInfo,
+    committee_members: Vec<String>,
 }
 struct OwnershipInfo {
     owner_address: String,
@@ -23,9 +28,9 @@ struct OwnershipInfo {
 
 //TODO: Can be optimized using serde::Value
 #[derive(Deserialize)]
-struct Response {          //TODO Unify
+struct Response<T> {          //TODO Unify
     jsonrpc: String,
-    result: u64,
+    result: T,
     id: u64,
 }
 #[derive(Debug, Deserialize)]
@@ -112,12 +117,18 @@ impl State {
                     consensus_public_key: "".to_string(),
                 }
             },
+            participation: "".to_string(),
+            reputation: "".to_string(),
+            uptime: "".to_string(),
             stake_info: StakeInfo {
                 staked: "".to_string(),
                 stake_locked_until: 0,
                 locked: "".to_string(),
                 locked_until: 0,
             },
+            committee_members: Vec::new(),
+
+
 
         }
     }
@@ -186,7 +197,7 @@ impl State {
             .await?;
 
         // Parse the JSON response
-        let response_json: Response = response.json().await?;
+        let response_json: Response<u64> = response.json().await?;
 
         // Extract the epoch value
         self.current_epoch = Some(response_json.result);
@@ -197,6 +208,7 @@ impl State {
     pub async fn write_current_network_info(&mut self) -> Result<()> {
 
         let url = "http://104.131.168.39:4230/rpc/v0";
+        //let url = "http://fleek-test.network:4240/rpc/v0";
         let client = reqwest::Client::new();
         let payload = serde_json::json!({
             "jsonrpc": "2.0",
@@ -213,9 +225,55 @@ impl State {
             .await?;
 
         let response_json: ApiResponseKeys<PublicKeys> = response.json().await?;
-        let mut public_key : String = response_json.result.node_public_key.clone();
-
+        let public_key : String = response_json.result.node_public_key.clone();
+        let consensus_key : String = response_json.result.consensus_public_key.clone();
+        self.ownership_info.public_keys.node_public_key = public_key.clone();
+        self.ownership_info.public_keys.consensus_public_key = consensus_key.clone();
         let client = reqwest::Client::new();
+
+        let client = Client::new();
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "flk_get_reputation",
+            "params": [public_key],
+            "id": 2, // TODO: Implement requestID logic
+
+        });
+        let response = client.post(url).json(&payload).send().await?;
+
+        let response_json :Response<Option<String>> = response.json().await?;
+        let reputation:Option<String> = Some(response_json.result.expect("Getting uptime failed"));
+        match reputation {
+            Some(reputation) => {
+                self.reputation = reputation;
+            }
+            None => {
+                //self.reputation = "No reputation available".to_string();
+                self.reputation = "0".to_string();
+            }
+        }
+
+        let payload = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "flk_get_node_uptime",
+        "params": [public_key],
+        "id": 3,
+        });
+        let response = client.post(url).json(&payload).send().await?;
+        let response_json:Response<Option<String>> = response.json().await?;
+        self.uptime = response_json.result.expect("Retrieving uptime failed").to_string();
+
+        // match uptime {
+        //     Some(uptime) => {
+        //         self.uptime = uptime;
+        //     }
+        //     None => {
+        //         //self.reputation = "No reputation available".to_string();
+        //         self.uptime = "0".to_string();
+        //     }
+        // }
+
+
 
         let payload = serde_json::json!({
             "jsonrpc": "2.0",
@@ -238,11 +296,25 @@ impl State {
                     self.stake_info.stake_locked_until = info.stake.stake_locked_until;
                     self.stake_info.locked = info.stake.locked;
                     self.stake_info.locked_until = info.stake.locked_until;
+                    self.participation = info.participation;
 
                 }
                 ResultField::Number(number) => continue,
             }
         }
+
+        // writing committee members to the struct
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "flk_get_committee_members",
+            "params": [],
+            "id": 8,
+        });
+        let response = client.post(url).json(&payload).send().await?;
+        //let response_json:Response<Value> = response.json().await?;
+        // if let Some(committee_members) = response_json["result"].as_array() {
+        //     f
+        // }
         Ok(())
 
     }
@@ -254,6 +326,44 @@ impl State {
     pub fn get_ethereum_address(&self) -> String {
         self.ownership_info.owner_address.clone()
     }
+    pub fn get_node_public_key(&self) -> String {
+        self.ownership_info.public_keys.node_public_key.clone()
+    }
+
+    pub fn get_consensus_public_key(&self) -> String {
+        self.ownership_info.public_keys.consensus_public_key.clone()
+    }
+
+    pub fn get_staked(&self) -> String {
+        self.stake_info.staked.clone()
+    }
+    pub fn get_stake_locked_until(&self) -> u64 {
+        self.stake_info.stake_locked_until
+    }
+
+    pub fn get_locked(&self) -> String {
+        self.stake_info.locked.clone()
+    }
+    pub fn get_locked_until(&self) -> u64 {
+        self.stake_info.locked_until
+    }
+
+    pub fn get_participation(&self) -> String {
+        self.participation.clone()
+    }
+
+    pub fn get_reputation(&self) -> String {
+        self.reputation.clone()
+    }
+
+    pub fn get_uptime(&self) -> String {
+        self.uptime.clone()
+    }
+
+    pub fn get_committee_members(&self) -> Vec<String> {
+        self.committee_members.clone()
+    }
+
 
     pub fn add_profile(&mut self, profiles: Profile) {
         self.profiles.insert(profiles.name.clone(), profiles);

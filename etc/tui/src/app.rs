@@ -277,7 +277,16 @@ impl App {
         self.network_view.init(tui.size()?)?;
         self.network_view.set_curr_epoch( self.state.get_epoch());
         self.network_view.set_ethereum_address( self.state.get_ethereum_address() );
-
+        self.network_view.set_node_public_key(self.state.get_node_public_key());
+        self.network_view.set_consensus_key(self.state.get_consensus_public_key());
+        self.network_view.set_staked(self.state.get_staked());
+        self.network_view.set_stake_locked_until(self.state.get_stake_locked_until());
+        self.network_view.set_get_locked(self.state.get_locked());
+        self.network_view.set_get_locked_until(self.state.get_locked_until());
+        self.network_view.set_participation(self.state.get_participation());
+        self.network_view.set_reputation(self.state.get_reputation());
+        self.network_view.set_uptime(self.state.get_uptime());
+        self.network_view.set_committee_members((self.state.get_committee_members()).clone());
         // If it's an error, there is no file and thus there is nothing to do.
         self.state.load_filters().await?;
         let filters = self.state.get_filters();
@@ -372,6 +381,7 @@ impl App {
                     },
                     Action::UpdateNetworkView => {
                         self.state.write_current_epoch().await?;
+                        self.state.write_current_network_info().await?;
                         tui.draw(|f| {
                             if let Err(e) = self.draw_components(f, f.size()) {
                                 action_tx

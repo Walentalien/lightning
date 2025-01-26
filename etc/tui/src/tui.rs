@@ -101,7 +101,7 @@ impl Tui {
 
     pub fn start(&mut self) {
         let tick_delay = Duration::from_secs_f64(1.0 / self.tick_rate);
-        let read_network_duration = Duration::from_secs_f64(300.0); // TODO define const
+        let read_network_duration = Duration::from_secs_f64(21600.0);
         let render_delay = Duration::from_secs_f64(1.0 / self.frame_rate);
         self.cancel();
         self.cancellation_token = CancellationToken::new();
