@@ -419,10 +419,9 @@ impl<C: NodeComponents> RequestWorker<C> {
         mut handle: impl lightning_interfaces::RequestInterface,
     ) -> Result<()> {
         // Parse request payload
-        let request = TaskRequest::decode(&header.bytes).map_err(|e| {
+        let request = TaskRequest::decode(&header.bytes).inspect_err(|_| {
             self.rep_reporter
                 .report_unsat(header.peer, lightning_interfaces::Weight::Weak);
-            e
         })?;
 
         let socket = self.socket.clone();

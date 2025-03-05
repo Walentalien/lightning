@@ -3,11 +3,10 @@ use std::time::Duration;
 
 use fleek_crypto::{AccountOwnerSecretKey, NodeSecretKey, SecretKey};
 use hp_fixed::unsigned::HpUfixed;
-use lightning_committee_beacon::{CommitteeBeaconConfig, CommitteeBeaconTimerConfig};
+use lightning_committee_beacon::CommitteeBeaconConfig;
 use lightning_interfaces::types::{
     CommitteeSelectionBeaconPhase,
     DeliveryAcknowledgmentProof,
-    ExecuteTransactionError,
     ExecutionData,
     ExecutionError,
     TransactionReceipt,
@@ -45,12 +44,7 @@ async fn test_epoch_change_with_all_committee_nodes() {
             max_ordering_time: 1,
             ..Default::default()
         })
-        .with_committee_beacon_config(CommitteeBeaconConfig {
-            timer: CommitteeBeaconTimerConfig {
-                tick_delay: Duration::from_millis(100),
-            },
-            ..Default::default()
-        })
+        .with_committee_beacon_config(CommitteeBeaconConfig::default())
         .with_genesis_mutator(|genesis| {
             genesis.committee_selection_beacon_commit_phase_duration = 3;
             genesis.committee_selection_beacon_reveal_phase_duration = 3;
@@ -69,11 +63,11 @@ async fn test_epoch_change_with_all_committee_nodes() {
 
     // Execute an epoch change transaction from less than 2/3 of the nodes.
     node1
-        .execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch }, None)
+        .execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch })
         .await
         .unwrap();
     node2
-        .execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch }, None)
+        .execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch })
         .await
         .unwrap();
 
@@ -115,17 +109,20 @@ async fn test_epoch_change_with_all_committee_nodes() {
 
     // Execute an epoch change transaction from enough nodes to trigger an epoch change.
     node3
-        .execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch }, None)
+        .execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch })
         .await
         .unwrap();
 
-    // Wait for epoch to be incremented across all nodes, even the one that did not send an epoch
+    // Wait for commit phase to start across all nodes, even the one that did not send an epoch
     // change transaction.
     poll_until(
         || async {
             network
                 .nodes()
-                .all(|node| node.app_query().get_current_epoch() == epoch + 1)
+                .all(|node| {
+                    node.app_query().get_committee_selection_beacon_phase()
+                        == Some(CommitteeSelectionBeaconPhase::Commit((0, 0)))
+                })
                 .then_some(())
                 .ok_or(PollUntilError::ConditionNotSatisfied)
         },
@@ -148,12 +145,11 @@ async fn test_epoch_change_with_all_committee_nodes() {
 
     // Check that the ready-to-change set for the next epoch is empty.
     for node in network.nodes() {
-        assert!(
-            node.app_query()
-                .get_committee_info(&(epoch + 1), |c| c.ready_to_change)
-                .unwrap_or_default()
-                .is_empty()
-        );
+        assert!(node
+            .app_query()
+            .get_committee_info(&(epoch + 1), |c| c.ready_to_change)
+            .unwrap_or_default()
+            .is_empty());
     }
 
     // Shutdown the network.
@@ -162,21 +158,18 @@ async fn test_epoch_change_with_all_committee_nodes() {
 
 #[tokio::test]
 async fn test_epoch_change_with_some_non_committee_nodes() {
+    let commit_phase_duration = 2000;
+    let reveal_phase_duration = 2000;
     let mut network = TestNetwork::builder()
         .with_mock_consensus(MockConsensusConfig {
             block_buffering_interval: Duration::from_millis(100),
             max_ordering_time: 1,
             ..Default::default()
         })
-        .with_committee_beacon_config(CommitteeBeaconConfig {
-            timer: CommitteeBeaconTimerConfig {
-                tick_delay: Duration::from_millis(100),
-            },
-            ..Default::default()
-        })
-        .with_genesis_mutator(|genesis| {
-            genesis.committee_selection_beacon_commit_phase_duration = 3;
-            genesis.committee_selection_beacon_reveal_phase_duration = 3;
+        .with_committee_beacon_config(CommitteeBeaconConfig::default())
+        .with_genesis_mutator(move |genesis| {
+            genesis.committee_selection_beacon_commit_phase_duration = commit_phase_duration;
+            genesis.committee_selection_beacon_reveal_phase_duration = reveal_phase_duration;
         })
         .with_committee_nodes::<TestFullNodeComponentsWithMockConsensus>(4)
         .await
@@ -202,11 +195,11 @@ async fn test_epoch_change_with_some_non_committee_nodes() {
 
     // Execute an epoch change transaction from less than 2/3 of the committee nodes.
     committee_node1
-        .execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch }, None)
+        .execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch })
         .await
         .unwrap();
     committee_node2
-        .execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch }, None)
+        .execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch })
         .await
         .unwrap();
 
@@ -232,45 +225,55 @@ async fn test_epoch_change_with_some_non_committee_nodes() {
     .unwrap();
 
     // Send epoch change transactions from the non-committee nodes.
-    let result = non_committee_node1
-        .execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch }, None)
-        .await;
-    match result.unwrap_err() {
-        ExecuteTransactionError::Reverted((_, TransactionReceipt { response, .. }, _)) => {
-            assert_eq!(
-                response,
-                TransactionResponse::Revert(ExecutionError::NotCommitteeMember)
-            )
+    let receipt = non_committee_node1
+        .execute_transaction_from_node_with_receipt(
+            UpdateMethod::ChangeEpoch { epoch },
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        receipt,
+        TransactionReceipt {
+            response: TransactionResponse::Revert(ExecutionError::NotCommitteeMember),
+            ..
         },
-        e => panic!("unexpected error type: {e:?}"),
-    }
-    let result = non_committee_node2
-        .execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch }, None)
-        .await;
-    match result.unwrap_err() {
-        ExecuteTransactionError::Reverted((_, TransactionReceipt { response, .. }, _)) => {
-            assert_eq!(
-                response,
-                TransactionResponse::Revert(ExecutionError::NotCommitteeMember)
-            )
-        },
-        e => panic!("unexpected error type: {e:?}"),
-    }
+    ));
 
-    // Check that the epoch has not been changed within some time period.
-    let result = poll_until(
+    let receipt = non_committee_node2
+        .execute_transaction_from_node_with_receipt(
+            UpdateMethod::ChangeEpoch { epoch },
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        receipt,
+        TransactionReceipt {
+            response: TransactionResponse::Revert(ExecutionError::NotCommitteeMember),
+            ..
+        },
+    ));
+
+    // Check that the commit phase has not started within some time period.
+    poll_until(
         || async {
             network
                 .nodes()
-                .all(|node| node.app_query().get_current_epoch() != epoch)
+                .all(|node| {
+                    node.app_query()
+                        .get_committee_selection_beacon_phase()
+                        .is_none()
+                })
                 .then_some(())
                 .ok_or(PollUntilError::ConditionNotSatisfied)
         },
         Duration::from_secs(1),
         Duration::from_millis(100),
     )
-    .await;
-    assert_eq!(result.unwrap_err(), PollUntilError::Timeout);
+    .await
+    .unwrap();
 
     // Check that the ready-to-change set in the committee info contains the nodes that sent an
     // epoch change transaction.
@@ -285,25 +288,41 @@ async fn test_epoch_change_with_some_non_committee_nodes() {
 
     // Execute an epoch change transaction from enough nodes to trigger an epoch change.
     committee_node3
-        .execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch }, None)
+        .execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch })
         .await
         .unwrap();
 
-    // Wait for epoch to be incremented across all nodes, even the one that did not send an epoch
-    // change transaction.
+    // Check that the commit phase has started.
     poll_until(
         || async {
             network
                 .nodes()
-                .all(|node| node.app_query().get_current_epoch() == epoch + 1)
+                .all(|node| {
+                    node.app_query().get_committee_selection_beacon_phase()
+                        == Some(CommitteeSelectionBeaconPhase::Commit((0, 0)))
+                })
                 .then_some(())
                 .ok_or(PollUntilError::ConditionNotSatisfied)
         },
-        Duration::from_secs(20),
+        Duration::from_secs(1),
         Duration::from_millis(100),
     )
     .await
     .unwrap();
+
+    // Wait for the commit phase to end.
+    tokio::time::sleep(Duration::from_millis(commit_phase_duration)).await;
+    // Send the commit phase timeout transaction from 2/3+1 committee nodes.
+    network.commit_phase_timeout(0).await.unwrap();
+
+    // Wait for the reveal phase to end.
+    tokio::time::sleep(Duration::from_millis(reveal_phase_duration)).await;
+    // Send the reveal phase timeout transaction from 2/3+1 committee nodes.
+    network.reveal_phase_timeout(0).await.unwrap();
+
+    // Wait for epoch to be incremented across all nodes, even the one that did not send an epoch
+    // change transaction.
+    network.wait_for_epoch_change(epoch + 1).await.unwrap();
 
     // Check that the ready-to-change set in the committee info contains all the nodes that sent an
     // epoch change transaction.
@@ -318,12 +337,11 @@ async fn test_epoch_change_with_some_non_committee_nodes() {
 
     // Check that the ready-to-change set for the next epoch is empty.
     for node in network.nodes() {
-        assert!(
-            node.app_query()
-                .get_committee_info(&(epoch + 1), |c| c.ready_to_change)
-                .unwrap_or_default()
-                .is_empty()
-        );
+        assert!(node
+            .app_query()
+            .get_committee_info(&(epoch + 1), |c| c.ready_to_change)
+            .unwrap_or_default()
+            .is_empty());
     }
 
     // Shutdown the network.
@@ -353,11 +371,9 @@ async fn test_change_epoch_with_only_locked_stake() {
 
     // Execute epoch change transaction from the node with only locked stake.
     let resp = network
-        .execute(vec![
-            network
-                .node(0)
-                .build_transaction(UpdateMethod::ChangeEpoch { epoch }),
-        ])
+        .execute(vec![network
+            .node(0)
+            .build_transaction(UpdateMethod::ChangeEpoch { epoch })])
         .await
         .unwrap();
     assert_eq!(resp.block_number, 1);
@@ -365,11 +381,9 @@ async fn test_change_epoch_with_only_locked_stake() {
 
     // Execute epoch change transaction from the node with unlocked stake.
     let resp = network
-        .execute(vec![
-            network
-                .node(1)
-                .build_transaction(UpdateMethod::ChangeEpoch { epoch }),
-        ])
+        .execute(vec![network
+            .node(1)
+            .build_transaction(UpdateMethod::ChangeEpoch { epoch })])
         .await
         .unwrap();
     assert_eq!(resp.block_number, 2);
@@ -378,13 +392,12 @@ async fn test_change_epoch_with_only_locked_stake() {
     // Check that we have transitioned to the committee beacon commit phase.
     assert_eq!(
         query.get_committee_selection_beacon_phase(),
-        Some(CommitteeSelectionBeaconPhase::Commit((2, 4)))
+        Some(CommitteeSelectionBeaconPhase::Commit((0, 0)))
     );
-    assert_eq!(query.get_committee_selection_beacon_round(), Some(0));
 }
 
 #[tokio::test]
-async fn test_change_epoch_reverts_if_node_opted_out() {
+async fn test_change_epoch_if_node_opted_out() {
     let network = utils::TestNetwork::builder()
         .with_committee_nodes(2)
         .build()
@@ -395,27 +408,25 @@ async fn test_change_epoch_reverts_if_node_opted_out() {
 
     // Execute opt-out transaction from the first node.
     let resp = network
-        .execute(vec![
-            network.node(0).build_transaction(UpdateMethod::OptOut {}),
-        ])
+        .execute(vec![network
+            .node(0)
+            .build_transaction(UpdateMethod::OptOut {})])
         .await
         .unwrap();
     assert_eq!(resp.block_number, 1);
 
     // Execute epoch change transaction from the node and check that it reverts.
     let resp = network
-        .maybe_execute(vec![
-            network
-                .node(0)
-                .build_transaction(UpdateMethod::ChangeEpoch { epoch }),
-        ])
+        .maybe_execute(vec![network
+            .node(0)
+            .build_transaction(UpdateMethod::ChangeEpoch { epoch })])
         .await
         .unwrap();
     assert_eq!(resp.block_number, 2);
     assert!(!resp.change_epoch);
     assert_eq!(
         resp.txn_receipts[0].response,
-        TransactionResponse::Revert(ExecutionError::NodeNotParticipating)
+        TransactionResponse::Success(ExecutionData::None)
     );
 }
 
@@ -487,6 +498,8 @@ async fn test_change_epoch_reverts_insufficient_stake() {
 
 #[tokio::test]
 async fn test_epoch_change_reverts_epoch_already_changed() {
+    let commit_phase_duration = 2000;
+    let reveal_phase_duration = 2000;
     let mut network = TestNetwork::builder()
         .with_committee_nodes::<TestFullNodeComponentsWithMockConsensus>(4)
         .await
@@ -496,22 +509,27 @@ async fn test_epoch_change_reverts_epoch_already_changed() {
     let node = network.node(0);
     let epoch = node.app_query().get_current_epoch();
 
-    // Trigger epoch change and wait for it to complete.
-    network.change_epoch_and_wait_for_complete().await.unwrap();
+    network
+        .change_epoch_and_wait_for_complete(0, commit_phase_duration, reveal_phase_duration)
+        .await
+        .unwrap();
 
     // Send epoch change transaction from a node for same epoch, and expect it to be reverted.
-    let result = node
-        .execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch }, None)
-        .await;
-    match result.unwrap_err() {
-        ExecuteTransactionError::Reverted((_, TransactionReceipt { response, .. }, _)) => {
-            assert_eq!(
-                response,
-                TransactionResponse::Revert(ExecutionError::EpochAlreadyChanged)
-            )
+    let receipt = node
+        .execute_transaction_from_node_with_receipt(
+            UpdateMethod::ChangeEpoch { epoch },
+            Duration::from_secs(10),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        receipt,
+        TransactionReceipt {
+            response: TransactionResponse::Revert(ExecutionError::EpochAlreadyChanged),
+            ..
         },
-        e => panic!("unexpected error type: {e:?}"),
-    }
+    ));
 
     // Shutdown the network.
     network.shutdown().await;
@@ -532,7 +550,7 @@ async fn test_epoch_change_reverts_epoch_has_not_started() {
 }
 
 #[tokio::test]
-async fn test_epoch_change_reverts_not_committee_member() {
+async fn test_epoch_change_reverts_not_participating() {
     let temp_dir = tempdir().unwrap();
 
     // Create a genesis committee and seed the application state with it.
@@ -558,6 +576,7 @@ async fn test_epoch_change_reverts_not_committee_member() {
     .await;
 
     // Execute opt-in transaction.
+    // The node will only participate once the next epoch starts.
     expect_tx_success(
         prepare_update_request_node(UpdateMethod::OptIn {}, &node_secret_key, 1),
         &update_socket,
@@ -567,7 +586,7 @@ async fn test_epoch_change_reverts_not_committee_member() {
 
     let change_epoch = UpdateMethod::ChangeEpoch { epoch: 0 };
     let update = prepare_update_request_node(change_epoch, &node_secret_key, 2);
-    expect_tx_revert(update, &update_socket, ExecutionError::NotCommitteeMember).await;
+    expect_tx_revert(update, &update_socket, ExecutionError::NodeNotParticipating).await;
 }
 
 #[tokio::test]
@@ -590,29 +609,26 @@ async fn test_epoch_change_reverts_already_signaled() {
 
 #[tokio::test]
 async fn test_distribute_rewards() {
+    let commit_phase_duration = 2000;
+    let reveal_phase_duration = 2000;
     let mut network = TestNetwork::builder()
         .with_mock_consensus(MockConsensusConfig {
             block_buffering_interval: Duration::from_millis(100),
             max_ordering_time: 1,
             ..Default::default()
         })
-        .with_committee_beacon_config(CommitteeBeaconConfig {
-            timer: CommitteeBeaconTimerConfig {
-                tick_delay: Duration::from_millis(100),
-            },
-            ..Default::default()
-        })
+        .with_committee_beacon_config(CommitteeBeaconConfig::default())
         .with_committee_nodes::<TestFullNodeComponentsWithMockConsensus>(4)
         .await
-        .with_genesis_mutator(|genesis| {
+        .with_genesis_mutator(move |genesis| {
             genesis.max_inflation = 10;
             genesis.node_share = 80;
             genesis.protocol_share = 10;
             genesis.service_builder_share = 10;
             genesis.max_boost = 4;
             genesis.supply_at_genesis = 1_000_000;
-            genesis.committee_selection_beacon_commit_phase_duration = 3;
-            genesis.committee_selection_beacon_reveal_phase_duration = 3;
+            genesis.committee_selection_beacon_commit_phase_duration = commit_phase_duration;
+            genesis.committee_selection_beacon_reveal_phase_duration = reveal_phase_duration;
         })
         .build()
         .await
@@ -683,21 +699,15 @@ async fn test_distribute_rewards() {
     ];
 
     // Execute delivery acknowledgment transactions.
-    node1
-        .execute_transaction_from_node(pod_10, None)
-        .await
-        .unwrap();
-    node1
-        .execute_transaction_from_node(pod_11, None)
-        .await
-        .unwrap();
-    node2
-        .execute_transaction_from_node(pod_21, None)
-        .await
-        .unwrap();
+    node1.execute_transaction_from_node(pod_10).await.unwrap();
+    node1.execute_transaction_from_node(pod_11).await.unwrap();
+    node2.execute_transaction_from_node(pod_21).await.unwrap();
 
     // Trigger epoch change and distribute rewards.
-    network.change_epoch_and_wait_for_complete().await.unwrap();
+    network
+        .change_epoch_and_wait_for_complete(0, commit_phase_duration, reveal_phase_duration)
+        .await
+        .unwrap();
 
     // Check node stables balances.
     assert_eq!(
@@ -785,21 +795,18 @@ async fn test_distribute_rewards() {
 
 #[tokio::test]
 async fn test_supply_across_epoch() {
+    let commit_phase_duration = 2000;
+    let reveal_phase_duration = 2000;
     let mut network = TestNetwork::builder()
         .with_mock_consensus(MockConsensusConfig {
             block_buffering_interval: Duration::from_millis(100),
             max_ordering_time: 1,
             ..Default::default()
         })
-        .with_committee_beacon_config(CommitteeBeaconConfig {
-            timer: CommitteeBeaconTimerConfig {
-                tick_delay: Duration::from_millis(100),
-            },
-            ..Default::default()
-        })
+        .with_committee_beacon_config(CommitteeBeaconConfig::default())
         .with_committee_nodes::<TestFullNodeComponentsWithMockConsensus>(4)
         .await
-        .with_genesis_mutator(|genesis| {
+        .with_genesis_mutator(move |genesis| {
             genesis.epoch_time = 100;
             genesis.epochs_per_year = 3;
             genesis.max_inflation = 10;
@@ -808,8 +815,8 @@ async fn test_supply_across_epoch() {
             genesis.service_builder_share = 10;
             genesis.max_boost = 4;
             genesis.supply_at_genesis = 1000000;
-            genesis.committee_selection_beacon_commit_phase_duration = 3;
-            genesis.committee_selection_beacon_reveal_phase_duration = 3;
+            genesis.committee_selection_beacon_commit_phase_duration = commit_phase_duration;
+            genesis.committee_selection_beacon_reveal_phase_duration = reveal_phase_duration;
         })
         .build()
         .await
@@ -842,15 +849,12 @@ async fn test_supply_across_epoch() {
     // supply are as expected.
     for epoch in 0..genesis.epochs_per_year {
         // Add at least one transaction per epoch, so reward pool is not zero.
-        node.execute_transaction_from_node(
-            UpdateMethod::SubmitDeliveryAcknowledgmentAggregation {
-                commodity: 10000,
-                service_id: 0,
-                proofs: vec![DeliveryAcknowledgmentProof],
-                metadata: None,
-            },
-            None,
-        )
+        node.execute_transaction_from_node(UpdateMethod::SubmitDeliveryAcknowledgmentAggregation {
+            commodity: 10000,
+            service_id: 0,
+            proofs: vec![DeliveryAcknowledgmentProof],
+            metadata: None,
+        })
         .await
         .unwrap();
 
@@ -867,16 +871,29 @@ async fn test_supply_across_epoch() {
 
                 map.insert(peer.index(), measurements.clone());
             }
-            node.execute_transaction_from_node(
-                UpdateMethod::SubmitReputationMeasurements { measurements: map },
-                None,
-            )
+            node.execute_transaction_from_node(UpdateMethod::SubmitReputationMeasurements {
+                measurements: map,
+            })
             .await
             .unwrap();
         }
 
-        // Trigger epoch change and wait for it to complete.
-        network.change_epoch_and_wait_for_complete().await.unwrap();
+        // Trigger epoch change and distribute rewards.
+        // Start commit phase.
+        let new_epoch = network.change_epoch().await.unwrap();
+
+        // Wait for the commit phase to end.
+        tokio::time::sleep(Duration::from_millis(commit_phase_duration)).await;
+        // Send the commit phase timeout transaction from 2/3+1 committee nodes.
+        network.commit_phase_timeout(0).await.unwrap();
+
+        // Wait for the reveal phase to end.
+        tokio::time::sleep(Duration::from_millis(reveal_phase_duration)).await;
+        // Send the reveal phase timeout transaction from 2/3+1 committee nodes.
+        network.reveal_phase_timeout(0).await.unwrap();
+
+        // Wait for the epoch change to complete.
+        network.wait_for_epoch_change(new_epoch).await.unwrap();
 
         // Check that the total supply was updated correctly.
         let supply_increase = &emissions_per_epoch * &node_share

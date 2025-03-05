@@ -80,7 +80,7 @@ impl ApplicationConfig {
     pub fn atomo_builder<'a>(
         &'a self,
         checkpoint: Option<([u8; 32], &'a [u8], &'a [String])>,
-    ) -> Result<AtomoBuilder<AtomoStorageBuilder, DefaultSerdeBackend>> {
+    ) -> Result<AtomoBuilder<AtomoStorageBuilder<'a>, DefaultSerdeBackend>> {
         let storage = match self.storage {
             StorageConfig::RocksDb => {
                 let db_path = self

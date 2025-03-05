@@ -650,8 +650,7 @@ impl TestNodeBuilder {
                         },
                     )),
             ),
-        )
-        .map_err(anyhow::Error::from)?;
+        )?;
         Ok(TestNode {
             app: node.provider.get::<C::ApplicationInterface>(),
             notifier: node.provider.get::<C::NotifierInterface>(),

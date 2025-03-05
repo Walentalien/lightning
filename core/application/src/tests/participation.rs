@@ -3,7 +3,13 @@ use std::time::Duration;
 
 use fleek_crypto::{AccountOwnerSecretKey, NodeSecretKey, SecretKey};
 use hp_fixed::unsigned::HpUfixed;
-use lightning_interfaces::types::{ExecutionData, ExecutionError, Participation, UpdateMethod};
+use lightning_interfaces::types::{
+    CommitteeSelectionBeaconCommit,
+    ExecutionData,
+    ExecutionError,
+    Participation,
+    UpdateMethod,
+};
 use lightning_interfaces::SyncQueryRunnerInterface;
 use lightning_test_utils::e2e::{TestFullNodeComponentsWithMockConsensus, TestNetwork};
 use lightning_utils::application::QueryRunnerExt;
@@ -14,6 +20,8 @@ use super::utils::*;
 
 #[tokio::test]
 async fn test_uptime_participation() {
+    let commit_phase_duration = 2000;
+    let reveal_phase_duration = 2000;
     let mut network = TestNetwork::builder()
         .with_committee_nodes::<TestFullNodeComponentsWithMockConsensus>(4)
         .await
@@ -30,21 +38,15 @@ async fn test_uptime_participation() {
 
     // Add records in the content registry for the peers.
     peer1
-        .execute_transaction_from_node(
-            UpdateMethod::UpdateContentRegistry {
-                updates: vec![Default::default()],
-            },
-            None,
-        )
+        .execute_transaction_from_node(UpdateMethod::UpdateContentRegistry {
+            updates: vec![Default::default()],
+        })
         .await
         .unwrap();
     peer2
-        .execute_transaction_from_node(
-            UpdateMethod::UpdateContentRegistry {
-                updates: vec![Default::default()],
-            },
-            None,
-        )
+        .execute_transaction_from_node(UpdateMethod::UpdateContentRegistry {
+            updates: vec![Default::default()],
+        })
         .await
         .unwrap();
 
@@ -64,20 +66,16 @@ async fn test_uptime_participation() {
     )
     .await
     .unwrap();
-    assert!(
-        !node
-            .app_query()
-            .get_content_registry(&peer1.index())
-            .unwrap_or_default()
-            .is_empty()
-    );
-    assert!(
-        !node
-            .app_query()
-            .get_content_registry(&peer2.index())
-            .unwrap_or_default()
-            .is_empty()
-    );
+    assert!(!node
+        .app_query()
+        .get_content_registry(&peer1.index())
+        .unwrap_or_default()
+        .is_empty());
+    assert!(!node
+        .app_query()
+        .get_content_registry(&peer2.index())
+        .unwrap_or_default()
+        .is_empty());
 
     // Submit reputation measurements from node 0, for peer 1 and 2.
     let measurements: BTreeMap<u32, lightning_interfaces::types::ReputationMeasurements> =
@@ -87,10 +85,7 @@ async fn test_uptime_participation() {
         ]);
     network
         .node(0)
-        .execute_transaction_from_node(
-            UpdateMethod::SubmitReputationMeasurements { measurements },
-            None,
-        )
+        .execute_transaction_from_node(UpdateMethod::SubmitReputationMeasurements { measurements })
         .await
         .unwrap();
 
@@ -101,15 +96,15 @@ async fn test_uptime_participation() {
     ]);
     network
         .node(1)
-        .execute_transaction_from_node(
-            UpdateMethod::SubmitReputationMeasurements { measurements },
-            None,
-        )
+        .execute_transaction_from_node(UpdateMethod::SubmitReputationMeasurements { measurements })
         .await
         .unwrap();
 
     // Change epoch and wait for it to be complete.
-    network.change_epoch_and_wait_for_complete().await.unwrap();
+    network
+        .change_epoch_and_wait_for_complete(0, commit_phase_duration, reveal_phase_duration)
+        .await
+        .unwrap();
 
     // Check participation.
     assert_eq!(
@@ -333,7 +328,7 @@ async fn test_opt_out_success() {
 
     // Create a genesis committee and seed the application state with it.
     let committee_size = 4;
-    let (committee, _keystore) = create_genesis_committee(committee_size);
+    let (committee, keystore) = create_genesis_committee(committee_size);
     let (update_socket, query_runner) = test_init_app(&temp_dir, committee);
 
     let owner_secret_key = AccountOwnerSecretKey::generate();
@@ -371,6 +366,168 @@ async fn test_opt_out_success() {
         get_node_participation(&query_runner, &node_pub_key),
         Participation::OptedIn
     );
+
+    // Change epoch.
+    expect_tx_success(
+        prepare_update_request_node(
+            UpdateMethod::ChangeEpoch { epoch: 0 },
+            &keystore[0].node_secret_key,
+            1,
+        ),
+        &update_socket,
+        ExecutionData::None,
+    )
+    .await;
+    expect_tx_success(
+        prepare_update_request_node(
+            UpdateMethod::ChangeEpoch { epoch: 0 },
+            &keystore[1].node_secret_key,
+            1,
+        ),
+        &update_socket,
+        ExecutionData::None,
+    )
+    .await;
+    expect_tx_success(
+        prepare_update_request_node(
+            UpdateMethod::ChangeEpoch { epoch: 0 },
+            &keystore[2].node_secret_key,
+            1,
+        ),
+        &update_socket,
+        ExecutionData::None,
+    )
+    .await;
+
+    expect_tx_success(
+        prepare_update_request_node(
+            UpdateMethod::CommitteeSelectionBeaconCommit {
+                commit: CommitteeSelectionBeaconCommit::build(0, 0, [1; 32]),
+            },
+            &keystore[0].node_secret_key,
+            2,
+        ),
+        &update_socket,
+        ExecutionData::None,
+    )
+    .await;
+    expect_tx_success(
+        prepare_update_request_node(
+            UpdateMethod::CommitteeSelectionBeaconCommit {
+                commit: CommitteeSelectionBeaconCommit::build(0, 0, [2; 32]),
+            },
+            &keystore[1].node_secret_key,
+            2,
+        ),
+        &update_socket,
+        ExecutionData::None,
+    )
+    .await;
+    expect_tx_success(
+        prepare_update_request_node(
+            UpdateMethod::CommitteeSelectionBeaconCommit {
+                commit: CommitteeSelectionBeaconCommit::build(0, 0, [3; 32]),
+            },
+            &keystore[2].node_secret_key,
+            2,
+        ),
+        &update_socket,
+        ExecutionData::None,
+    )
+    .await;
+
+    expect_tx_success(
+        prepare_update_request_node(
+            UpdateMethod::CommitteeSelectionBeaconCommitPhaseTimeout { epoch: 0, round: 0 },
+            &keystore[0].node_secret_key,
+            3,
+        ),
+        &update_socket,
+        ExecutionData::None,
+    )
+    .await;
+    expect_tx_success(
+        prepare_update_request_node(
+            UpdateMethod::CommitteeSelectionBeaconCommitPhaseTimeout { epoch: 0, round: 0 },
+            &keystore[1].node_secret_key,
+            3,
+        ),
+        &update_socket,
+        ExecutionData::None,
+    )
+    .await;
+    expect_tx_success(
+        prepare_update_request_node(
+            UpdateMethod::CommitteeSelectionBeaconCommitPhaseTimeout { epoch: 0, round: 0 },
+            &keystore[2].node_secret_key,
+            3,
+        ),
+        &update_socket,
+        ExecutionData::None,
+    )
+    .await;
+
+    expect_tx_success(
+        prepare_update_request_node(
+            UpdateMethod::CommitteeSelectionBeaconReveal { reveal: [1; 32] },
+            &keystore[0].node_secret_key,
+            4,
+        ),
+        &update_socket,
+        ExecutionData::None,
+    )
+    .await;
+    expect_tx_success(
+        prepare_update_request_node(
+            UpdateMethod::CommitteeSelectionBeaconReveal { reveal: [2; 32] },
+            &keystore[1].node_secret_key,
+            4,
+        ),
+        &update_socket,
+        ExecutionData::None,
+    )
+    .await;
+    expect_tx_success(
+        prepare_update_request_node(
+            UpdateMethod::CommitteeSelectionBeaconReveal { reveal: [3; 32] },
+            &keystore[2].node_secret_key,
+            4,
+        ),
+        &update_socket,
+        ExecutionData::None,
+    )
+    .await;
+
+    expect_tx_success(
+        prepare_update_request_node(
+            UpdateMethod::CommitteeSelectionBeaconRevealPhaseTimeout { epoch: 0, round: 0 },
+            &keystore[0].node_secret_key,
+            5,
+        ),
+        &update_socket,
+        ExecutionData::None,
+    )
+    .await;
+    expect_tx_success(
+        prepare_update_request_node(
+            UpdateMethod::CommitteeSelectionBeaconRevealPhaseTimeout { epoch: 0, round: 0 },
+            &keystore[1].node_secret_key,
+            5,
+        ),
+        &update_socket,
+        ExecutionData::None,
+    )
+    .await;
+    expect_tx_success(
+        prepare_update_request_node(
+            UpdateMethod::CommitteeSelectionBeaconRevealPhaseTimeout { epoch: 0, round: 0 },
+            &keystore[2].node_secret_key,
+            5,
+        ),
+        &update_socket,
+        ExecutionData::EpochChange,
+    )
+    .await;
 
     // Execute opt-out transaction.
     let opt_out = UpdateMethod::OptOut {};

@@ -62,10 +62,7 @@ pub fn safetensors_serialize_outputs(session_outputs: SessionOutputs) -> anyhow:
         }
     }
 
-    safetensors_out
-        .serialize(&None)
-        .map(Into::into)
-        .map_err(Into::into)
+    safetensors_out.serialize(&None).map(Into::into)
 }
 
 pub fn borsh_serialize_outputs(

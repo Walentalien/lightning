@@ -34,7 +34,7 @@ impl<'a> ShutdownSignal<'a> {
     }
 }
 
-impl<'a> Future for ShutdownSignal<'a> {
+impl Future for ShutdownSignal<'_> {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Self::Output> {
@@ -51,7 +51,7 @@ impl<'a> Future for ShutdownSignal<'a> {
     }
 }
 
-impl<'a> Drop for ShutdownSignal<'a> {
+impl Drop for ShutdownSignal<'_> {
     fn drop(&mut self) {
         if let Some(slot) = self.list_position.take() {
             let mut wait_list = self.shard.unwrap().lock().expect("wait_list lock poisoned");

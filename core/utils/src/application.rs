@@ -75,6 +75,7 @@ pub trait QueryRunnerExt: SyncQueryRunnerInterface {
             epoch,
             epoch_era,
             epoch_end: committee.epoch_end_timestamp,
+            epoch_transition: committee.epoch_transition_timestamp,
         }
     }
 
@@ -303,12 +304,29 @@ pub trait QueryRunnerExt: SyncQueryRunnerInterface {
         }
     }
 
-    /// Returns the current round of the committee selection beacon.
-    fn get_committee_selection_beacon_round(&self) -> Option<u64> {
-        match self.get_metadata(&Metadata::CommitteeSelectionBeaconRound) {
-            Some(Value::CommitteeSelectionBeaconRound(round)) => Some(round),
-            None => None,
-            _ => unreachable!("invalid committee selection beacon round in metadata"),
+    /// Returns the duration of committee selection beacon commit phase.
+    fn get_committee_beacon_commit_phase_duration(&self) -> u64 {
+        match self
+            .get_protocol_param(&ProtocolParamKey::CommitteeSelectionBeaconCommitPhaseDuration)
+        {
+            Some(ProtocolParamValue::CommitteeSelectionBeaconCommitPhaseDuration(duration)) => {
+                duration
+            },
+            None => unreachable!("missing commit phase duration"),
+            _ => unreachable!("invalid commit phase duration"),
+        }
+    }
+
+    /// Returns the duration of committee selection beacon reveal phase.
+    fn get_committee_beacon_reveal_phase_duration(&self) -> u64 {
+        match self
+            .get_protocol_param(&ProtocolParamKey::CommitteeSelectionBeaconRevealPhaseDuration)
+        {
+            Some(ProtocolParamValue::CommitteeSelectionBeaconRevealPhaseDuration(duration)) => {
+                duration
+            },
+            None => unreachable!("missing reveal phase duration"),
+            _ => unreachable!("invalid reveal phase duration"),
         }
     }
 }

@@ -29,6 +29,7 @@ use crate::content_registry::ContentUpdate;
 use crate::{
     CommitteeSelectionBeaconCommit,
     CommitteeSelectionBeaconReveal,
+    CommitteeSelectionBeaconRound,
     DeliveryAcknowledgmentProof,
     NodeIndex,
     NodePorts,
@@ -356,6 +357,11 @@ pub enum UpdateMethod {
         /// The address to recieve these tokens on the L2
         receiving_address: EthAddress,
     },
+    /// Remove the withdraws from the withdraws table.
+    ClearWithdraws {
+        /// Remove all withdraws with id less than `withdraw_id`
+        withdraw_id: u64,
+    },
     /// Mint tokens on the network that were bridged over from the L2
     // TODO(matthias): this is a temporary transaction type until the proof of consensus is
     // implemented for the `Deposit` transaction.
@@ -366,6 +372,17 @@ pub enum UpdateMethod {
         token: Tokens,
         /// The address to recieve these tokens on the network
         receiving_address: EthAddress,
+        /// The transaction hash from the deposit transaction send to the bridge contract.
+        eth_tx_hash: [u8; 32],
+        /// The block number from the deposit transaction send to the bridge contract.
+        block_number: u64,
+    },
+    /// Remove the processed mints from the mint table.
+    // TODO(matthias): this is a temporary transaction type until the proof of consensus is
+    // implemented for the `Deposit` transaction.
+    ClearMints {
+        /// We can remove all mints whose block number is less than `block_number`.
+        block_number: u64,
     },
     /// Submit of PoC from the bridge on the L2 to get the tokens in network
     Deposit {
@@ -432,9 +449,15 @@ pub enum UpdateMethod {
         reveal: CommitteeSelectionBeaconReveal,
     },
     /// Sent by nodes when they see that the committee selection beacon commit phase has timed out.
-    CommitteeSelectionBeaconCommitPhaseTimeout,
+    CommitteeSelectionBeaconCommitPhaseTimeout {
+        epoch: Epoch,
+        round: CommitteeSelectionBeaconRound,
+    },
     /// Sent by nodes when they see that the committee selection beacon reveal phase has timed out.
-    CommitteeSelectionBeaconRevealPhaseTimeout,
+    CommitteeSelectionBeaconRevealPhaseTimeout {
+        epoch: Epoch,
+        round: CommitteeSelectionBeaconRound,
+    },
     /// Adding a new service to the protocol
     AddService {
         service: Service,
@@ -547,17 +570,33 @@ impl ToDigest for UpdatePayload {
                     .with("token", token)
                     .with("receiving_address", &receiving_address.0);
             },
+            UpdateMethod::ClearWithdraws { withdraw_id } => {
+                transcript_builder = transcript_builder
+                    .with("transaction_name", &"clear_withdraws")
+                    .with_prefix("input".to_owned())
+                    .with("withdraw_id", withdraw_id);
+            },
             UpdateMethod::Mint {
                 amount,
                 token,
                 receiving_address,
+                eth_tx_hash,
+                block_number,
             } => {
                 transcript_builder = transcript_builder
                     .with("transaction_name", &"mint")
                     .with_prefix("input".to_owned())
                     .with("amount", &HpUfixedWrapper(amount.clone()))
                     .with("token", token)
-                    .with("receiving_address", &receiving_address.0);
+                    .with("receiving_address", &receiving_address.0)
+                    .with("eth_tx_hash", eth_tx_hash)
+                    .with("block_number", block_number);
+            },
+            UpdateMethod::ClearMints { block_number } => {
+                transcript_builder = transcript_builder
+                    .with("transaction_name", &"clear_mints")
+                    .with_prefix("input".to_owned())
+                    .with("block_number", block_number);
             },
             UpdateMethod::Transfer { amount, token, to } => {
                 transcript_builder = transcript_builder
@@ -646,20 +685,28 @@ impl ToDigest for UpdatePayload {
             UpdateMethod::CommitteeSelectionBeaconReveal { reveal } => {
                 transcript_builder = transcript_builder
                     .with("transaction_name", &"committee_selection_beacon_reveal")
-                    .with("reveal", reveal)
-                    .with_prefix("input".to_owned());
+                    .with_prefix("input".to_owned())
+                    .with("reveal", reveal);
             },
-            UpdateMethod::CommitteeSelectionBeaconCommitPhaseTimeout => {
-                transcript_builder = transcript_builder.with(
-                    "transaction_name",
-                    &"committee_selection_beacon_commit_phase_timeout",
-                );
+            UpdateMethod::CommitteeSelectionBeaconCommitPhaseTimeout { epoch, round } => {
+                transcript_builder = transcript_builder
+                    .with(
+                        "transaction_name",
+                        &"committee_selection_beacon_commit_phase_timeout",
+                    )
+                    .with_prefix("input".to_owned())
+                    .with("epoch", epoch)
+                    .with("round", round);
             },
-            UpdateMethod::CommitteeSelectionBeaconRevealPhaseTimeout => {
-                transcript_builder = transcript_builder.with(
-                    "transaction_name",
-                    &"committee_selection_beacon_reveal_phase_timeout",
-                );
+            UpdateMethod::CommitteeSelectionBeaconRevealPhaseTimeout { epoch, round } => {
+                transcript_builder = transcript_builder
+                    .with(
+                        "transaction_name",
+                        &"committee_selection_beacon_reveal_phase_timeout",
+                    )
+                    .with_prefix("input".to_owned())
+                    .with("epoch", epoch)
+                    .with("round", round);
             },
             UpdateMethod::AddService {
                 service,

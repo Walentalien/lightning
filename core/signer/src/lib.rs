@@ -1,7 +1,6 @@
-mod component;
-mod worker;
-
-pub use component::*;
-
 #[cfg(test)]
 pub mod tests;
+
+mod listener;
+mod signer;
+pub use signer::Signer;

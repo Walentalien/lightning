@@ -1,18 +1,21 @@
 use std::cmp::Ordering;
 
-use fleek_crypto::{AccountOwnerSecretKey, NodeSecretKey, SecretKey};
+use fleek_crypto::{AccountOwnerSecretKey, EthAddress, NodeSecretKey, SecretKey};
 use hp_fixed::unsigned::HpUfixed;
 use lightning_interfaces::prelude::*;
 use lightning_interfaces::types::{
     ExecutionError,
+    GenesisAccount,
     NodeIndex,
     NodeInfo,
     Participation,
     Staking,
+    Tokens,
     UpdateMethod,
     UpdatePayload,
     UpdateRequest,
 };
+use lightning_interfaces::WithdrawPagingParams;
 use lightning_utils::application::QueryRunnerExt;
 use rand::seq::SliceRandom;
 use tempfile::tempdir;
@@ -227,6 +230,285 @@ async fn test_invalid_chain_id() {
         payload: payload.clone(),
     };
     expect_tx_revert(update, &update_socket, ExecutionError::InvalidChainId).await;
+}
+
+#[tokio::test]
+async fn test_valid_mint_tx() {
+    let temp_dir = tempdir().unwrap();
+
+    let mut genesis = test_genesis();
+    let gov_secret_key = AccountOwnerSecretKey::generate();
+    let gov_public_key = gov_secret_key.to_pk();
+    let gov_address: EthAddress = gov_public_key.into();
+
+    genesis.governance_address = gov_address;
+
+    let (update_socket, query_runner) = init_app_with_genesis(&temp_dir, &genesis);
+
+    let secret_key = AccountOwnerSecretKey::generate();
+    let public_key = secret_key.to_pk();
+    let recv_address: EthAddress = public_key.into();
+
+    let eth_tx_hash = [1; 32];
+
+    let method = UpdateMethod::Mint {
+        amount: HpUfixed::<18>::from(100_u64),
+        token: Tokens::FLK,
+        receiving_address: recv_address,
+        eth_tx_hash,
+        block_number: 1,
+    };
+    let request = prepare_update_request_account(method, &gov_secret_key, 1);
+
+    // verify that the mint has not been ordered
+    assert!(!query_runner.has_minted(eth_tx_hash));
+
+    expect_tx_success(request, &update_socket, types::ExecutionData::None).await;
+
+    // verify that the mint has been ordered
+    assert!(query_runner.has_minted(eth_tx_hash));
+}
+
+#[tokio::test]
+async fn test_double_mint_tx() {
+    let temp_dir = tempdir().unwrap();
+
+    let mut genesis = test_genesis();
+    let gov_secret_key = AccountOwnerSecretKey::generate();
+    let gov_public_key = gov_secret_key.to_pk();
+    let gov_address: EthAddress = gov_public_key.into();
+
+    genesis.governance_address = gov_address;
+
+    let (update_socket, query_runner) = init_app_with_genesis(&temp_dir, &genesis);
+
+    let secret_key = AccountOwnerSecretKey::generate();
+    let public_key = secret_key.to_pk();
+    let recv_address: EthAddress = public_key.into();
+
+    let eth_tx_hash = [1; 32];
+
+    let method = UpdateMethod::Mint {
+        amount: HpUfixed::<18>::from(100_u64),
+        token: Tokens::FLK,
+        receiving_address: recv_address,
+        eth_tx_hash,
+        block_number: 1,
+    };
+    let request = prepare_update_request_account(method.clone(), &gov_secret_key, 1);
+
+    // verify that the mint has not been ordered
+    assert!(!query_runner.has_minted(eth_tx_hash));
+
+    expect_tx_success(request, &update_socket, types::ExecutionData::None).await;
+
+    // verify that the mint has been ordered
+    assert!(query_runner.has_minted(eth_tx_hash));
+
+    // try to mint again
+    let request = prepare_update_request_account(method, &gov_secret_key, 2);
+    expect_tx_revert(request, &update_socket, ExecutionError::AlreadyMinted).await;
+}
+
+#[tokio::test]
+async fn test_mint_tx_non_governance_key() {
+    let temp_dir = tempdir().unwrap();
+
+    let (update_socket, query_runner) = init_app(&temp_dir, None);
+
+    let secret_key = AccountOwnerSecretKey::generate();
+    let public_key = secret_key.to_pk();
+    let recv_address: EthAddress = public_key.into();
+
+    let eth_tx_hash = [1; 32];
+
+    let method = UpdateMethod::Mint {
+        amount: HpUfixed::<18>::from(100_u64),
+        token: Tokens::FLK,
+        receiving_address: recv_address,
+        eth_tx_hash,
+        block_number: 1,
+    };
+    let request = prepare_update_request_account(method, &secret_key, 1);
+
+    expect_tx_revert(request, &update_socket, ExecutionError::OnlyGovernance).await;
+
+    // verify that the mint has not been ordered
+    assert!(!query_runner.has_minted(eth_tx_hash));
+}
+
+#[tokio::test]
+async fn test_clear_mints_tx_non_governance_key() {
+    let temp_dir = tempdir().unwrap();
+
+    let (update_socket, query_runner) = init_app(&temp_dir, None);
+
+    let secret_key = AccountOwnerSecretKey::generate();
+
+    let eth_tx_hash = [1; 32];
+
+    let method = UpdateMethod::ClearMints { block_number: 1 };
+    let request = prepare_update_request_account(method, &secret_key, 1);
+
+    expect_tx_revert(request, &update_socket, ExecutionError::OnlyGovernance).await;
+
+    // verify that the mint has not been ordered
+    assert!(!query_runner.has_minted(eth_tx_hash));
+}
+
+#[tokio::test]
+async fn test_valid_clear_mints_tx() {
+    let temp_dir = tempdir().unwrap();
+
+    let mut genesis = test_genesis();
+    let gov_secret_key = AccountOwnerSecretKey::generate();
+    let gov_public_key = gov_secret_key.to_pk();
+    let gov_address: EthAddress = gov_public_key.into();
+
+    genesis.governance_address = gov_address;
+
+    let (update_socket, query_runner) = init_app_with_genesis(&temp_dir, &genesis);
+
+    let secret_key = AccountOwnerSecretKey::generate();
+    let public_key = secret_key.to_pk();
+    let recv_address: EthAddress = public_key.into();
+    let eth_tx_hash1 = [1; 32];
+    let method = UpdateMethod::Mint {
+        amount: HpUfixed::<18>::from(100_u64),
+        token: Tokens::FLK,
+        receiving_address: recv_address,
+        eth_tx_hash: eth_tx_hash1,
+        block_number: 1,
+    };
+    let request = prepare_update_request_account(method, &gov_secret_key, 1);
+    expect_tx_success(request, &update_socket, types::ExecutionData::None).await;
+    assert!(query_runner.has_minted(eth_tx_hash1));
+
+    let secret_key = AccountOwnerSecretKey::generate();
+    let public_key = secret_key.to_pk();
+    let recv_address: EthAddress = public_key.into();
+    let eth_tx_hash2 = [2; 32];
+    let method = UpdateMethod::Mint {
+        amount: HpUfixed::<18>::from(100_u64),
+        token: Tokens::FLK,
+        receiving_address: recv_address,
+        eth_tx_hash: eth_tx_hash2,
+        block_number: 2,
+    };
+    let request = prepare_update_request_account(method, &gov_secret_key, 2);
+    expect_tx_success(request, &update_socket, types::ExecutionData::None).await;
+    assert!(query_runner.has_minted(eth_tx_hash2));
+
+    let secret_key = AccountOwnerSecretKey::generate();
+    let public_key = secret_key.to_pk();
+    let recv_address: EthAddress = public_key.into();
+    let eth_tx_hash3 = [3; 32];
+    let method = UpdateMethod::Mint {
+        amount: HpUfixed::<18>::from(100_u64),
+        token: Tokens::FLK,
+        receiving_address: recv_address,
+        eth_tx_hash: eth_tx_hash3,
+        block_number: 3,
+    };
+    let request = prepare_update_request_account(method, &gov_secret_key, 3);
+    expect_tx_success(request, &update_socket, types::ExecutionData::None).await;
+    assert!(query_runner.has_minted(eth_tx_hash3));
+
+    let method = UpdateMethod::ClearMints { block_number: 3 };
+    let request = prepare_update_request_account(method, &gov_secret_key, 4);
+    expect_tx_success(request, &update_socket, types::ExecutionData::None).await;
+
+    // verify that tx1 and tx2 were removed from the table, because their block number is less than
+    // 2.
+    assert!(!query_runner.has_minted(eth_tx_hash1));
+    assert!(!query_runner.has_minted(eth_tx_hash2));
+    assert!(query_runner.has_minted(eth_tx_hash3));
+}
+
+#[tokio::test]
+async fn test_clear_withdraws_tx_non_governance_key() {
+    let temp_dir = tempdir().unwrap();
+
+    let (update_socket, _query_runner) = init_app(&temp_dir, None);
+
+    let secret_key = AccountOwnerSecretKey::generate();
+
+    let method = UpdateMethod::ClearWithdraws { withdraw_id: 1 };
+    let request = prepare_update_request_account(method, &secret_key, 1);
+
+    expect_tx_revert(request, &update_socket, ExecutionError::OnlyGovernance).await;
+}
+
+#[tokio::test]
+async fn test_valid_clear_withdraws_tx() {
+    let temp_dir = tempdir().unwrap();
+
+    let mut genesis = test_genesis();
+    let gov_secret_key = AccountOwnerSecretKey::generate();
+    let gov_public_key = gov_secret_key.to_pk();
+    let gov_address: EthAddress = gov_public_key.into();
+
+    genesis.governance_address = gov_address;
+
+    let secret_key = AccountOwnerSecretKey::generate();
+    let public_key = secret_key.to_pk();
+    let recv_address: EthAddress = public_key.into();
+    genesis.account = vec![GenesisAccount {
+        bandwidth_balance: 0,
+        flk_balance: 1000_u64.into(),
+        stables_balance: 0,
+        public_key: recv_address,
+    }];
+
+    let (update_socket, query_runner) = init_app_with_genesis(&temp_dir, &genesis);
+
+    let method = UpdateMethod::Withdraw {
+        amount: 100_u64.into(),
+        token: Tokens::FLK,
+        receiving_address: recv_address,
+    };
+    let request = prepare_update_request_account(method, &secret_key, 1);
+    expect_tx_success(request, &update_socket, types::ExecutionData::None).await;
+
+    let method = UpdateMethod::Withdraw {
+        amount: 100_u64.into(),
+        token: Tokens::FLK,
+        receiving_address: recv_address,
+    };
+    let request = prepare_update_request_account(method, &secret_key, 2);
+    expect_tx_success(request, &update_socket, types::ExecutionData::None).await;
+
+    let method = UpdateMethod::Withdraw {
+        amount: 100_u64.into(),
+        token: Tokens::FLK,
+        receiving_address: recv_address,
+    };
+    let request = prepare_update_request_account(method, &secret_key, 3);
+    expect_tx_success(request, &update_socket, types::ExecutionData::None).await;
+
+    let withdraws = query_runner.get_withdraws(WithdrawPagingParams {
+        start: 0,
+        limit: 10,
+    });
+    // Make sure all three withdraws are in the table
+    assert_eq!(withdraws.len(), 3);
+    // The withdraw ids start at 0, so at the beginning, the min id should be 0
+    let min_id = withdraws.iter().map(|w| w.id).min().unwrap();
+    assert_eq!(min_id, 0);
+
+    let method = UpdateMethod::ClearWithdraws { withdraw_id: 2 };
+    let request = prepare_update_request_account(method, &gov_secret_key, 1);
+    expect_tx_success(request, &update_socket, types::ExecutionData::None).await;
+
+    let withdraws = query_runner.get_withdraws(WithdrawPagingParams {
+        start: 0,
+        limit: 10,
+    });
+    // We removed all withdraws with id less than 2, which only leaves one withdraw
+    assert_eq!(withdraws.len(), 1);
+    // The min id should now be 2
+    let min_id = withdraws.iter().map(|w| w.id).min().unwrap();
+    assert_eq!(min_id, 2);
 }
 
 // (dalton) Since the quick sort used to select the winners of the auctions takes &self of the whole

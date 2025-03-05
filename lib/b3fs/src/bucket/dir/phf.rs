@@ -69,7 +69,7 @@ pub fn hash(entry: &[u8], key: u64) -> Hashes {
 const PHF_DEFAULT_LAMBDA: usize = 5;
 
 pub fn calculate_buckets_len(entries_len: usize) -> usize {
-    (entries_len + PHF_DEFAULT_LAMBDA - 1) / PHF_DEFAULT_LAMBDA
+    entries_len.div_ceil(PHF_DEFAULT_LAMBDA)
 }
 
 fn try_generate_hash(entries: &[(InlineVec, Offset)], key: u64) -> Option<HasherState> {

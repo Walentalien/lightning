@@ -137,7 +137,7 @@ pub trait SyncQueryRunnerInterface: Clone + Send + Sync + 'static {
     /// Query Node Table
     /// Returns information about a single node.
     fn get_node_info<V>(&self, node: &NodeIndex, selector: impl FnOnce(NodeInfo) -> V)
-    -> Option<V>;
+        -> Option<V>;
 
     /// Returns an Iterator to Node Table
     fn get_node_table_iter<V>(&self, closure: impl FnOnce(KeyIterator<NodeIndex>) -> V) -> V;
@@ -246,8 +246,11 @@ pub trait SyncQueryRunnerInterface: Clone + Send + Sync + 'static {
     // Returns whether the genesis block has been applied.
     fn has_genesis(&self) -> bool;
 
-    /// Returns a list of withdraws
+    /// Returns a list of withdraws.
     fn get_withdraws(&self, paging: WithdrawPagingParams) -> Vec<WithdrawInfoWithId>;
+
+    /// Returns true if the mint transaction for the provided tx hash was ordered.
+    fn has_minted(&self, tx_hash: [u8; 32]) -> bool;
 }
 
 #[derive(Clone, Debug)]

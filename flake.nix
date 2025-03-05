@@ -115,7 +115,7 @@
           craneLib = (crane.mkLib pkgs).overrideToolchain (
             fenix.packages.${system}.fromToolchainFile {
               dir = ./.;
-              sha256 = "X4me+hn5B6fbQGQ7DThreB/DqxexAhEQT8VNvW6Pwq4=";
+              sha256 = "sha256-J0fzDFBqvXT2dqbDdQ71yt2/IKTq4YvQs6QCSkmSdKY=";
             }
           );
 
@@ -123,7 +123,8 @@
 
           librusty_v8 = (
             let
-              v8_version = "0.106.0";
+              # Must match v8 crate version
+              v8_version = "130.0.8";
               arch = pkgs.rust.toRustTarget pkgs.stdenv.hostPlatform;
             in
             pkgs.fetchurl {
@@ -131,8 +132,8 @@
               url = "https://github.com/denoland/rusty_v8/releases/download/v${v8_version}/librusty_v8_release_${arch}.a.gz";
               sha256 =
                 {
-                  x86_64-linux = "sha256-f7V60F69XsRhgwg34K9TFWruelVuux7MKpLG5vlV7Oc=";
-                  aarch64-darwin = "sha256-A3l/ZsHdcGf/qTmiA/NGvoSKo0c97dIDBt4dSChFXtc=";
+                  x86_64-linux = "sha256-e4LOkoISZaECzHMsWxwJ5dVM7i865DCmWrJux1XYuaQ=";
+                  aarch64-darwin = "sha256-roXmQvE8uaPei0jTSycTd/FIcQ9KGZ6MRMVL45I3Qb8=";
                 }
                 ."${system}";
               postFetch = ''
@@ -272,7 +273,7 @@
                 inherit cargoArtifacts;
                 partitions = 1;
                 partitionType = "count";
-                cargoNextestExtraArgs = "--workspace";
+                cargoNextestExtraArgs = "--workspace --nocapture";
                 RUST_LOG = "debug";
               }
             );
@@ -320,14 +321,16 @@
                   ]
                   ++ lib.optionals (!pkgs.stdenv.isDarwin) [
                     # sgx service, not available on mac
-                    fn-service-3
+                    self.packages.${system}.fn-service-3
                   ];
               };
 
               fn-service-0 = mkLightningBin "fn-service-0";
               fn-service-1 = mkLightningBin "fn-service-1";
               fn-service-2 = mkLightningBin "fn-service-2";
-
+            }
+            // lib.optionalAttrs (!pkgs.stdenv.isDarwin) {
+              # sgx service, not available on mac
               fn-service-3 = craneLib.buildPackage (
                 commonArgs
                 // {

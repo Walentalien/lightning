@@ -59,12 +59,11 @@ pub struct AtomoTable<
 >(RefCell<AtomoTableRef<'selector, K, V, B, S>>);
 
 impl<
-    'selector,
-    K: Hash + Eq + Serialize + DeserializeOwned + Any,
-    V: Serialize + DeserializeOwned + Any + Clone,
-    B: StorageBackend,
-    S: SerdeBackend,
-> TableRef<K, V> for AtomoTable<'selector, K, V, B, S>
+        K: Hash + Eq + Serialize + DeserializeOwned + Any,
+        V: Serialize + DeserializeOwned + Any + Clone,
+        B: StorageBackend,
+        S: SerdeBackend,
+    > TableRef<K, V> for AtomoTable<'_, K, V, B, S>
 {
     fn set(&self, key: K, value: V) {
         self.0.borrow_mut().insert(key, value);

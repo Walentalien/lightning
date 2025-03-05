@@ -82,7 +82,7 @@ impl<'s> TryFrom<&'s Vec<[u8; 32]>> for HashTree<'s> {
     }
 }
 
-impl<'s> Index<usize> for HashTree<'s> {
+impl Index<usize> for HashTree<'_> {
     type Output = [u8; 32];
 
     #[inline]
@@ -184,7 +184,7 @@ impl<'s> Iterator for HashTreeIter<'s> {
     }
 }
 
-impl<'s> DoubleEndedIterator for HashTreeIter<'s> {
+impl DoubleEndedIterator for HashTreeIter<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.is_done() {
             return None;
@@ -200,7 +200,7 @@ impl<'s> DoubleEndedIterator for HashTreeIter<'s> {
     }
 }
 
-impl<'s> Debug for HashTree<'s> {
+impl Debug for HashTree<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         super::printer::print(self, f)
     }
@@ -268,7 +268,8 @@ where
                 .collect();
 
             // Store the entire page of hashes
-            self.pages[page_index] = Some(hashes.into_boxed_slice()); // Store as boxed slice of hashes
+            self.pages[page_index] = Some(hashes.into_boxed_slice()); // Store as boxed slice of
+                                                                      // hashes
         }
 
         // Retrieve the hash from the loaded page

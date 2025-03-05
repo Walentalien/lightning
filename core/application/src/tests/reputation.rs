@@ -96,6 +96,8 @@ async fn test_submit_rep_measurements_too_many_times() {
 
 #[tokio::test]
 async fn test_rep_scores() {
+    let commit_phase_duration = 2000;
+    let reveal_phase_duration = 2000;
     let mut network = TestNetwork::builder()
         .with_committee_nodes::<TestFullNodeComponentsWithMockConsensus>(4)
         .await
@@ -123,12 +125,9 @@ async fn test_rep_scores() {
             generate_reputation_measurements(&mut rng, 0.1),
         ),
     ]);
-    node.execute_transaction_from_node(
-        UpdateMethod::SubmitReputationMeasurements { measurements },
-        None,
-    )
-    .await
-    .unwrap();
+    node.execute_transaction_from_node(UpdateMethod::SubmitReputationMeasurements { measurements })
+        .await
+        .unwrap();
 
     // Submit reputation measurements from node 1, for peer 1 and 2.
     let measurements = BTreeMap::from_iter(vec![
@@ -141,27 +140,25 @@ async fn test_rep_scores() {
             generate_reputation_measurements(&mut rng, 0.1),
         ),
     ]);
-    node.execute_transaction_from_node(
-        UpdateMethod::SubmitReputationMeasurements { measurements },
-        None,
-    )
-    .await
-    .unwrap();
+    node.execute_transaction_from_node(UpdateMethod::SubmitReputationMeasurements { measurements })
+        .await
+        .unwrap();
 
     // Change epoch and wait for it to be complete.
-    network.change_epoch_and_wait_for_complete().await.unwrap();
+    network
+        .change_epoch_and_wait_for_complete(0, commit_phase_duration, reveal_phase_duration)
+        .await
+        .unwrap();
 
     // Check the reputation scores.
-    assert!(
-        node.app_query()
-            .get_reputation_score(&peer1.index())
-            .is_some()
-    );
-    assert!(
-        node.app_query()
-            .get_reputation_score(&peer2.index())
-            .is_some()
-    );
+    assert!(node
+        .app_query()
+        .get_reputation_score(&peer1.index())
+        .is_some());
+    assert!(node
+        .app_query()
+        .get_reputation_score(&peer2.index())
+        .is_some());
 
     // Shutdown the network.
     network.shutdown().await;
@@ -259,7 +256,7 @@ async fn test_submit_reputation_measurements_too_many_measurements() {
     let temp_dir = tempdir().unwrap();
 
     let committee_size = 4;
-    let (committee, _keystore) = create_genesis_committee(committee_size);
+    let (committee, keystore) = create_genesis_committee(committee_size);
     let (update_socket, query_runner) = test_init_app(&temp_dir, committee);
     let mut rng = random::get_seedable_rng();
 
@@ -277,14 +274,6 @@ async fn test_submit_reputation_measurements_too_many_measurements() {
     )
     .await;
 
-    // Execute opt-in transaction.
-    expect_tx_success(
-        prepare_update_request_node(UpdateMethod::OptIn {}, &node_secret_key, 1),
-        &update_socket,
-        ExecutionData::None,
-    )
-    .await;
-
     let mut measurements = BTreeMap::new();
 
     // create many dummy measurements that len >
@@ -293,8 +282,8 @@ async fn test_submit_reputation_measurements_too_many_measurements() {
     }
     let update = prepare_update_request_node(
         UpdateMethod::SubmitReputationMeasurements { measurements },
-        &node_secret_key,
-        2,
+        &keystore[0].node_secret_key,
+        1,
     );
 
     expect_tx_revert(update, &update_socket, ExecutionError::TooManyMeasurements).await;

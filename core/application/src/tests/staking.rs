@@ -10,7 +10,7 @@ use fleek_crypto::{
     SecretKey,
 };
 use hp_fixed::unsigned::HpUfixed;
-use lightning_committee_beacon::{CommitteeBeaconConfig, CommitteeBeaconTimerConfig};
+use lightning_committee_beacon::CommitteeBeaconConfig;
 use lightning_interfaces::types::{
     CommitteeSelectionBeaconCommit,
     ExecutionData,
@@ -74,13 +74,11 @@ async fn test_stake() {
         .unwrap();
     assert_eq!(node_registry_changes.len(), 1);
     assert_eq!(node_registry_changes.get(&0).unwrap().len(), committee_size);
-    assert!(
-        node_registry_changes
-            .get(&0)
-            .unwrap()
-            .iter()
-            .all(|(_, change)| { matches!(change, NodeRegistryChange::New) })
-    );
+    assert!(node_registry_changes
+        .get(&0)
+        .unwrap()
+        .iter()
+        .all(|(_, change)| { matches!(change, NodeRegistryChange::New) }));
 
     let owner_secret_key = AccountOwnerSecretKey::generate();
     let peer_pub_key = NodeSecretKey::generate().to_pk();
@@ -772,13 +770,10 @@ async fn test_withdraw_unstaked_reverts_no_locked_tokens() {
 
 #[tokio::test]
 async fn test_withdraw_unstaked_works_properly() {
+    let commit_phase_duration = 2000;
+    let reveal_phase_duration = 2000;
     let mut network = TestNetwork::builder()
-        .with_committee_beacon_config(CommitteeBeaconConfig {
-            timer: CommitteeBeaconTimerConfig {
-                tick_delay: Duration::from_millis(100),
-            },
-            ..Default::default()
-        })
+        .with_committee_beacon_config(CommitteeBeaconConfig::default())
         .with_mock_consensus(MockConsensusConfig {
             max_ordering_time: 0,
             min_ordering_time: 0,
@@ -815,7 +810,10 @@ async fn test_withdraw_unstaked_works_properly() {
     // Iterate through 5 epochs to to unlock `lock_time`.
     for _ in 0..5 {
         // Trigger epoch change and wait for it to be complete.
-        network.change_epoch_and_wait_for_complete().await.unwrap();
+        network
+            .change_epoch_and_wait_for_complete(0, commit_phase_duration, reveal_phase_duration)
+            .await
+            .unwrap();
     }
 
     // Get node owner flk balance.
@@ -903,6 +901,7 @@ async fn test_unstake_as_non_committee_node_opts_out_node_and_removes_after_epoc
                 .nodes
                 .iter()
                 .enumerate()
+                .take(4)
                 .map(|(i, n)| {
                     n.build_transaction(UpdateMethod::CommitteeSelectionBeaconCommit {
                         commit: CommitteeSelectionBeaconCommit::build(epoch, 0, [i as u8; 32]),
@@ -913,12 +912,33 @@ async fn test_unstake_as_non_committee_node_opts_out_node_and_removes_after_epoc
         .await
         .unwrap();
     assert_eq!(resp.block_number, 3);
+
+    // Execute commit phase timeout transaction.
+    let resp = network
+        .execute(
+            network
+                .nodes
+                .iter()
+                .take(3)
+                .map(|n| {
+                    n.build_transaction(UpdateMethod::CommitteeSelectionBeaconCommitPhaseTimeout {
+                        epoch,
+                        round: 0,
+                    })
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.block_number, 4);
+
     let resp = network
         .execute(
             network
                 .nodes
                 .iter()
                 .enumerate()
+                .take(4)
                 .map(|(i, n)| {
                     n.build_transaction(UpdateMethod::CommitteeSelectionBeaconReveal {
                         reveal: [i as u8; 32],
@@ -928,7 +948,26 @@ async fn test_unstake_as_non_committee_node_opts_out_node_and_removes_after_epoc
         )
         .await
         .unwrap();
-    assert_eq!(resp.block_number, 4);
+    assert_eq!(resp.block_number, 5);
+
+    // Execute commit phase timeout transaction.
+    let resp = network
+        .execute(
+            network
+                .nodes
+                .iter()
+                .take(3)
+                .map(|n| {
+                    n.build_transaction(UpdateMethod::CommitteeSelectionBeaconRevealPhaseTimeout {
+                        epoch,
+                        round: 0,
+                    })
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.block_number, 6);
 
     // Check that the epoch has changed.
     assert_eq!(query.get_current_epoch(), epoch + 1);
@@ -1002,6 +1041,26 @@ async fn test_unstake_as_committee_node_opts_out_node_and_removes_after_epoch_ch
         .await
         .unwrap();
     assert_eq!(resp.block_number, 3);
+
+    // Execute commit phase timeout transaction.
+    let resp = network
+        .execute(
+            network
+                .nodes
+                .iter()
+                .take(4)
+                .map(|n| {
+                    n.build_transaction(UpdateMethod::CommitteeSelectionBeaconCommitPhaseTimeout {
+                        epoch,
+                        round: 0,
+                    })
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.block_number, 4);
+
     let resp = network
         .execute(
             network
@@ -1017,7 +1076,26 @@ async fn test_unstake_as_committee_node_opts_out_node_and_removes_after_epoch_ch
         )
         .await
         .unwrap();
-    assert_eq!(resp.block_number, 4);
+    assert_eq!(resp.block_number, 5);
+
+    // Execute commit phase timeout transaction.
+    let resp = network
+        .execute(
+            network
+                .nodes
+                .iter()
+                .take(4)
+                .map(|n| {
+                    n.build_transaction(UpdateMethod::CommitteeSelectionBeaconRevealPhaseTimeout {
+                        epoch,
+                        round: 0,
+                    })
+                })
+                .collect(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.block_number, 6);
 
     // Check that the epoch has changed.
     assert_eq!(query.get_current_epoch(), epoch + 1);

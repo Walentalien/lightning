@@ -155,7 +155,7 @@ pub trait FleekApi {
 
     #[method(name = "get_node_registry")]
     async fn get_node_registry(&self, paging: Option<NodePagingParams>)
-    -> RpcResult<Vec<NodeInfo>>;
+        -> RpcResult<Vec<NodeInfo>>;
 
     #[method(name = "get_node_registry_index")]
     async fn get_node_registry_index(
@@ -226,6 +226,9 @@ pub trait FleekApi {
         epoch: Option<u64>,
         paging: WithdrawPagingParams,
     ) -> RpcResult<Vec<WithdrawInfoWithId>>;
+
+    #[method(name = "has_minted")]
+    async fn has_minted(&self, tx_hash: [u8; 32]) -> RpcResult<bool>;
 
     #[subscription(name = "subscribe", item = Event)]
     async fn handle_subscription(&self, event_type: Option<EventType>) -> SubscriptionResult;

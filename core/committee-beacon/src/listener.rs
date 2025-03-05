@@ -1,19 +1,17 @@
+use std::time::{Duration, Instant};
+
 use anyhow::Result;
 use lightning_interfaces::prelude::*;
+use lightning_interfaces::types::CommitteeSelectionBeaconRound;
 use lightning_utils::application::QueryRunnerExt;
 use rand::Rng;
 use types::{
     BlockExecutionResponse,
-    BlockNumber,
     CommitteeSelectionBeaconCommit,
     CommitteeSelectionBeaconPhase,
     CommitteeSelectionBeaconReveal,
     Epoch,
     ExecuteTransactionError,
-    ExecuteTransactionOptions,
-    ExecuteTransactionRequest,
-    ExecuteTransactionRetry,
-    ExecuteTransactionWait,
     Metadata,
     NodeIndex,
     UpdateMethod,
@@ -23,6 +21,9 @@ use types::{
 use crate::database::{CommitteeBeaconDatabase, CommitteeBeaconDatabaseQuery};
 use crate::rocks::RocksCommitteeBeaconDatabase;
 use crate::CommitteeBeaconError;
+
+const QUERY_INTERVAL: Duration = Duration::from_secs(1);
+const RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct CommitteeBeaconListener<C: NodeComponents> {
     db: RocksCommitteeBeaconDatabase,
@@ -99,13 +100,17 @@ impl<C: NodeComponents> CommitteeBeaconListener<C> {
             return Ok(());
         }
 
+        // The node only submits the commit and reveal transactions if it is on the committee.
+        let committee = self.app_query.get_committee_members_by_index();
+        let on_committee = committee.contains(&self.node_index);
+        if !on_committee {
+            return Ok(());
+        }
+
         // Get the current phase from metadata.
         let phase = self
             .app_query
             .get_metadata(&Metadata::CommitteeSelectionBeaconPhase);
-
-        // Get the current block number.
-        let current_block = response.block_number + 1;
 
         // Handle the current phase.
         match phase {
@@ -114,10 +119,10 @@ impl<C: NodeComponents> CommitteeBeaconListener<C> {
                 return Ok(());
             },
             Some(Value::CommitteeSelectionBeaconPhase(CommitteeSelectionBeaconPhase::Commit(
-                (start_block, end_block),
+                (commit_phase_epoch, round),
             ))) => {
                 let result = self
-                    .handle_commit_phase(epoch, start_block, end_block, current_block)
+                    .handle_commit_phase(epoch, commit_phase_epoch, round)
                     .await;
 
                 // Handling executed block responses is best-effort, and so if the commit phase
@@ -128,10 +133,10 @@ impl<C: NodeComponents> CommitteeBeaconListener<C> {
                 }
             },
             Some(Value::CommitteeSelectionBeaconPhase(CommitteeSelectionBeaconPhase::Reveal(
-                (start_block, end_block),
+                (reveal_phase_epoch, round),
             ))) => {
                 let result = self
-                    .handle_reveal_phase(epoch, start_block, end_block, current_block)
+                    .handle_reveal_phase(epoch, reveal_phase_epoch, round)
                     .await;
 
                 // Handling executed block responses is best-effort, and so if the reveal phase
@@ -161,15 +166,13 @@ impl<C: NodeComponents> CommitteeBeaconListener<C> {
     async fn handle_commit_phase(
         &self,
         epoch: Epoch,
-        start_block: BlockNumber,
-        end_block: BlockNumber,
-        current_block: BlockNumber,
+        commit_phase_epoch: Epoch,
+        round: CommitteeSelectionBeaconRound,
     ) -> Result<(), CommitteeBeaconError> {
         tracing::debug!(
-            "handling commit phase ({}, {}) at block {}",
-            start_block,
-            end_block,
-            current_block
+            "handling commit phase (epoch: {}, commit_phase_epoch: {})",
+            epoch,
+            commit_phase_epoch,
         );
 
         // If this node was a recent non-revealing node, skip the commit phase, since it will be
@@ -185,28 +188,8 @@ impl<C: NodeComponents> CommitteeBeaconListener<C> {
             return Ok(());
         }
 
-        // If this is the first block outside of the commit phase range, execute a commit timeout
-        // transaction and return.
-        if current_block > end_block {
-            tracing::debug!("submitting commit phase timeout transaction");
-            let result = self
-                .execute_transaction_with_no_retry(
-                    UpdateMethod::CommitteeSelectionBeaconCommitPhaseTimeout,
-                )
-                .await;
-
-            if let Err(e) = result {
-                // We don't need to return an error here because we expect this transaction to be
-                // reverted for most nodes since we only need the first node to trigger the timeout.
-                // It's also best-effort in that we'll just try again on the next block.
-                tracing::debug!("failed to submit commit phase timeout transaction: {:?}", e);
-            }
-
-            return Ok(());
-        }
-
-        // If we are not in the commit phase block range, do nothing and return.
-        if current_block < start_block || current_block > end_block {
+        // If we are not in the correct commit phase, do nothing and return.
+        if epoch != commit_phase_epoch {
             return Ok(());
         }
 
@@ -219,25 +202,50 @@ impl<C: NodeComponents> CommitteeBeaconListener<C> {
             return Ok(());
         }
 
-        // If we have not committed, generate a random value for our commit transaction, save to
-        // local database, and submit it.
-        let reveal = self.generate_random_reveal();
-        let round = self.app_query.get_committee_selection_beacon_round();
-        let Some(round) = round else {
-            tracing::error!("no committee selection beacon round found for commit");
-            return Ok(());
-        };
-        let commit = CommitteeSelectionBeaconCommit::build(epoch, round, reveal);
+        // Check if we already generated a commit for the given epoch and round.
+        // This can happen because this method could be called before the commit was stored on the
+        // state. In that case we would not return on the check above.
+        let commit = if let Some(commit) = self.db.query().get_commit(epoch, round) {
+            commit
+        } else {
+            // Generate a random value for our commit transaction, save to
+            // local database, and submit it.
+            let reveal = self.generate_random_reveal();
 
-        // Save random beacon data to local database.
-        self.db.set_beacon(epoch, commit, reveal);
+            let commit = CommitteeSelectionBeaconCommit::build(epoch, round, reveal);
+
+            // Save random beacon data to local database.
+            self.db.set_beacon(epoch, round, commit, reveal);
+            commit
+        };
 
         // Build commit and submit it.
-        tracing::info!("submitting commit transaction: {:?}", commit);
-        self.execute_transaction_with_retry_on_invalid_nonce(
-            UpdateMethod::CommitteeSelectionBeaconCommit { commit },
-        )
-        .await?;
+        tracing::info!(
+            "Submitting commit transaction (epoch: {epoch}, round: {round}): {:?}",
+            commit
+        );
+
+        self.execute_transaction(UpdateMethod::CommitteeSelectionBeaconCommit { commit })
+            .await?;
+
+        let mut now = Instant::now();
+        loop {
+            tokio::time::sleep(QUERY_INTERVAL).await;
+
+            if self
+                .app_query
+                .get_committee_selection_beacon(&self.node_index)
+                .is_some()
+            {
+                break;
+            }
+
+            if now.elapsed() > RETRY_TIMEOUT {
+                self.execute_transaction(UpdateMethod::CommitteeSelectionBeaconCommit { commit })
+                    .await?;
+                now = Instant::now();
+            }
+        }
 
         Ok(())
     }
@@ -253,40 +261,17 @@ impl<C: NodeComponents> CommitteeBeaconListener<C> {
     async fn handle_reveal_phase(
         &self,
         epoch: Epoch,
-        start_block: BlockNumber,
-        end_block: BlockNumber,
-        current_block: BlockNumber,
+        reveal_phase_epoch: Epoch,
+        round: CommitteeSelectionBeaconRound,
     ) -> Result<(), CommitteeBeaconError> {
         tracing::debug!(
-            "handling reveal phase ({}, {}) at block {}",
-            start_block,
-            end_block,
-            current_block
+            "handling reveal phase (epoch: {}, reveal_phase_epoch: {})",
+            epoch,
+            reveal_phase_epoch,
         );
 
-        // If this is the first block outside of the reveal phase range, execute a reveal timeout
-        // transaction and return. This will trigger an update in the application executor that will
-        // restart a new round and commit phase.
-        if current_block > end_block {
-            tracing::debug!("submitting reveal phase timeout transaction");
-            let result = self
-                .execute_transaction_with_no_retry(
-                    UpdateMethod::CommitteeSelectionBeaconRevealPhaseTimeout,
-                )
-                .await;
-
-            if let Err(e) = result {
-                // We don't need to return an error here because we expect this transaction to be
-                // reverted for most nodes since we only need the first node to trigger the timeout.
-                // It's also best-effort in that we'll just try again on the next block.
-                tracing::debug!("failed to submit reveal phase timeout transaction: {:?}", e);
-            }
-
-            return Ok(());
-        }
-
-        // If we are not in the reveal phase block range, do nothing and return.
-        if current_block < start_block || current_block > end_block {
+        // If we are not in the correct reveal phase, do nothing and return.
+        if epoch != reveal_phase_epoch {
             return Ok(());
         }
 
@@ -313,11 +298,36 @@ impl<C: NodeComponents> CommitteeBeaconListener<C> {
         };
 
         // Otherwise, send our reveal transaction.
-        tracing::info!("submitting reveal transaction: {:?}", reveal);
-        self.execute_transaction_with_retry_on_invalid_nonce(
-            UpdateMethod::CommitteeSelectionBeaconReveal { reveal },
-        )
-        .await?;
+        tracing::info!(
+            "Submitting reveal transaction (epoch: {epoch}, round: {round}): {:?}",
+            reveal
+        );
+
+        self.execute_transaction(UpdateMethod::CommitteeSelectionBeaconReveal { reveal })
+            .await?;
+
+        let mut now = Instant::now();
+        loop {
+            tokio::time::sleep(QUERY_INTERVAL).await;
+
+            let Some((_commit, maybe_beacon)) = self
+                .app_query
+                .get_committee_selection_beacon(&self.node_index)
+            else {
+                // We check above that the commit already exists, so this will never happen.
+                break;
+            };
+
+            if maybe_beacon.is_some() {
+                break;
+            }
+
+            if now.elapsed() > RETRY_TIMEOUT {
+                self.execute_transaction(UpdateMethod::CommitteeSelectionBeaconReveal { reveal })
+                    .await?;
+                now = Instant::now();
+            }
+        }
 
         Ok(())
     }
@@ -326,44 +336,12 @@ impl<C: NodeComponents> CommitteeBeaconListener<C> {
     async fn execute_transaction(
         &self,
         method: UpdateMethod,
-        options: ExecuteTransactionOptions,
     ) -> Result<(), ExecuteTransactionError> {
         self.signer
-            .run(ExecuteTransactionRequest {
-                method,
-                options: Some(options),
-            })
-            .await??;
+            .run(method.into())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
         Ok(())
-    }
-
-    async fn execute_transaction_with_retry_on_invalid_nonce(
-        &self,
-        method: UpdateMethod,
-    ) -> Result<(), ExecuteTransactionError> {
-        self.execute_transaction(
-            method,
-            ExecuteTransactionOptions {
-                wait: ExecuteTransactionWait::Receipt,
-                ..Default::default()
-            },
-        )
-        .await
-    }
-
-    async fn execute_transaction_with_no_retry(
-        &self,
-        method: UpdateMethod,
-    ) -> Result<(), ExecuteTransactionError> {
-        self.execute_transaction(
-            method,
-            ExecuteTransactionOptions {
-                wait: ExecuteTransactionWait::Receipt,
-                retry: ExecuteTransactionRetry::Never,
-                ..Default::default()
-            },
-        )
-        .await
     }
 
     /// Generate random reveal value.

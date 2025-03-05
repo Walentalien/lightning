@@ -367,7 +367,7 @@ impl<L: LatencyProvider> Simulation<L> {
         let time = msg.time.0;
 
         debug_assert!(time > self.now);
-        Some(ceil_div(time - self.now, FRAME_DURATION.as_nanos()).max(1) as usize)
+        Some((time - self.now).div_ceil(FRAME_DURATION.as_nanos()).max(1) as usize)
     }
 
     fn start_threads(&mut self) {
@@ -503,9 +503,4 @@ fn wait_for_workers(state: &Arc<SharedState>) {
 
         std::hint::spin_loop();
     }
-}
-
-#[inline(always)]
-fn ceil_div(a: u128, b: u128) -> u128 {
-    (a + b - 1) / b
 }

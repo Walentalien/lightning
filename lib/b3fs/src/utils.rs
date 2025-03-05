@@ -71,8 +71,8 @@ pub const fn block_counter_from_tree_index(index: usize) -> Option<usize> {
         // =floor(log2(x + 1))
         let exp = usize::BITS - (x + 1).leading_zeros() - 1;
         let m = 1usize << (exp - 1); // 2^(exp - 1)
-        // find our position in the right subtree and perform
-        // the next step recursivly.
+                                     // find our position in the right subtree and perform
+                                     // the next step recursivly.
         x -= 2 * m - 1;
         // our index is at least as largest as all of the items in our left
         // subtree. All of the `m`s we are adding are unique power of twos
@@ -208,7 +208,7 @@ pub const fn le_bytes_from_words_32(words: &[u32; 8]) -> [u8; 32] {
 /// Used internally as a helper to pretty print hashes as hex strings.
 pub struct Digest<'d>(pub &'d [u8; 32]);
 
-impl<'d> Debug for Digest<'d> {
+impl Debug for Digest<'_> {
     #[inline(always)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", to_hex(self.0))

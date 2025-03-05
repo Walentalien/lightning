@@ -20,6 +20,7 @@ use lightning_application::Application;
 use lightning_checkpointer::Checkpointer;
 use lightning_committee_beacon::CommitteeBeaconComponent;
 use lightning_interfaces::prelude::*;
+use lightning_interfaces::types::{ExecuteTransaction, TransactionReceipt};
 use lightning_node::ContainedNode;
 use lightning_notifier::Notifier;
 use lightning_pinger::Pinger;
@@ -29,13 +30,10 @@ use lightning_rpc::Rpc;
 use lightning_signer::Signer;
 use lightning_utils::transaction::TransactionSigner;
 use merklize::StateRootHash;
+use tokio::sync::oneshot;
 use types::{
     Epoch,
     ExecuteTransactionError,
-    ExecuteTransactionOptions,
-    ExecuteTransactionRequest,
-    ExecuteTransactionResponse,
-    ExecuteTransactionWait,
     Genesis,
     NodeIndex,
     NodeInfo,
@@ -78,8 +76,12 @@ pub trait TestNetworkNode {
     async fn execute_transaction_from_node(
         &self,
         method: UpdateMethod,
-        options: Option<ExecuteTransactionOptions>,
-    ) -> Result<ExecuteTransactionResponse, ExecuteTransactionError>;
+    ) -> Result<(), ExecuteTransactionError>;
+    async fn execute_transaction_from_node_with_receipt(
+        &self,
+        method: UpdateMethod,
+        timeout: Duration,
+    ) -> Result<TransactionReceipt, ExecuteTransactionError>;
 }
 
 pub type BoxedTestNode = Box<dyn TestNetworkNode>;
@@ -240,22 +242,34 @@ impl<C: NodeComponents> TestNetworkNode for TestFullNode<C> {
     async fn execute_transaction_from_node(
         &self,
         method: UpdateMethod,
-        options: Option<ExecuteTransactionOptions>,
-    ) -> Result<ExecuteTransactionResponse, ExecuteTransactionError> {
-        let resp = self
-            .signer()
+    ) -> Result<(), ExecuteTransactionError> {
+        self.signer()
             .get_socket()
-            .run(ExecuteTransactionRequest {
-                method,
-                options: Some(options.unwrap_or(ExecuteTransactionOptions {
-                    wait: ExecuteTransactionWait::Receipt,
-                    timeout: Some(Duration::from_secs(10)),
-                    ..Default::default()
-                })),
-            })
-            .await??;
+            .run(method.into())
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+        Ok(())
+    }
 
-        Ok(resp)
+    async fn execute_transaction_from_node_with_receipt(
+        &self,
+        method: UpdateMethod,
+        timeout: Duration,
+    ) -> Result<TransactionReceipt, ExecuteTransactionError> {
+        let (receipt_tx, receipt_rx) = oneshot::channel();
+        self.signer()
+            .get_socket()
+            .run(ExecuteTransaction {
+                method: method.clone(),
+                receipt_tx: Some(receipt_tx),
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+
+        tokio::time::timeout(timeout, receipt_rx)
+            .await
+            .map_err(|_| ExecuteTransactionError::Timeout((method, None, 1)))?
+            .map_err(|e| ExecuteTransactionError::Other(format!("{e:?}")))
     }
 }
 

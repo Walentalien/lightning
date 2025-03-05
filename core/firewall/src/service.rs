@@ -145,7 +145,7 @@ pub trait IntoIpAddr {
     fn ip_addr(&self) -> std::net::IpAddr;
 }
 
-impl<'a> IntoIpAddr for &'a hyper::server::conn::AddrStream {
+impl IntoIpAddr for &hyper::server::conn::AddrStream {
     fn ip_addr(&self) -> std::net::IpAddr {
         self.remote_addr().ip()
     }

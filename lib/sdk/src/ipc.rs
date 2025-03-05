@@ -26,6 +26,7 @@ pub(crate) static mut BLOCKSTORE: Option<PathBuf> = None;
 
 /// Bind to the connection stream.
 pub async fn conn_bind() -> ConnectionListener {
+    #[allow(static_mut_refs)]
     let path = unsafe { IPC_PATH.as_ref() }
         .expect("Service setupt not complete.")
         .join("conn");
@@ -218,6 +219,7 @@ fn handle_message(message: IpcMessage) {
 /// You should only call this method from within a service handlers.
 pub async fn send_no_response(request: Request) {
     unsafe {
+        #[allow(static_mut_refs)]
         let sender = SENDER.as_ref().expect("setup not completed");
         sender
             .send(IpcRequest {
@@ -238,6 +240,7 @@ pub async fn send_no_response(request: Request) {
 pub async fn send_and_await_response(request: Request) -> Response {
     let (request_ctx, future) = crate::futures::create_future();
     unsafe {
+        #[allow(static_mut_refs)]
         let sender = SENDER.as_ref().expect("setup not completed");
         sender
             .send(IpcRequest {

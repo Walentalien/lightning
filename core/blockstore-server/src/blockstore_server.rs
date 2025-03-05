@@ -326,7 +326,7 @@ pub enum DirFrame<'a> {
     Eos,
 }
 
-impl<'a> DirFrame<'a> {
+impl DirFrame<'_> {
     fn entry_len(entry: &OwnedEntry) -> usize {
         let mut bytes = entry.name.len();
         match &entry.link {
@@ -355,7 +355,7 @@ impl<'a> DirFrame<'a> {
     }
 }
 
-impl<'a> From<Frame<'a>> for Bytes {
+impl From<Frame<'_>> for Bytes {
     fn from(value: Frame) -> Self {
         let mut b = BytesMut::new();
         match value {

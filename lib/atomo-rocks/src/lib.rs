@@ -103,7 +103,7 @@ impl<'a> RocksBackendBuilder<'a> {
     }
 }
 
-impl<'a> StorageBackendConstructor for RocksBackendBuilder<'a> {
+impl StorageBackendConstructor for RocksBackendBuilder<'_> {
     type Storage = RocksBackend;
 
     type Error = anyhow::Error;

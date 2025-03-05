@@ -4,15 +4,10 @@ use std::time::Duration;
 use anyhow::Result;
 use futures::future::join_all;
 use lightning_interfaces::prelude::*;
+use lightning_interfaces::types::CommitteeSelectionBeaconRound;
 use lightning_utils::application::QueryRunnerExt;
 use lightning_utils::poll::{poll_until, PollUntilError};
-use types::{
-    Epoch,
-    ExecuteTransactionOptions,
-    ExecuteTransactionRetry,
-    ExecuteTransactionWait,
-    UpdateMethod,
-};
+use types::{Epoch, UpdateMethod};
 
 use super::{BoxedTestNode, TestNetwork};
 
@@ -20,9 +15,23 @@ impl TestNetwork {
     /// Execute epoch change transaction from all nodes and wait for epoch to be incremented.
     ///
     /// Returns an error if the epoch does not change within a timeout.
-    pub async fn change_epoch_and_wait_for_complete(&self) -> Result<Epoch> {
-        // Execute epoch change transaction from all nodes.
-        let new_epoch = self.change_epoch().await?;
+    pub async fn change_epoch_and_wait_for_complete(
+        &self,
+        round: CommitteeSelectionBeaconRound,
+        commit_phase_duration: u64,
+        reveal_phase_duration: u64,
+    ) -> Result<Epoch> {
+        let new_epoch = self.change_epoch().await.unwrap();
+
+        // Wait for the commit phase to end.
+        tokio::time::sleep(Duration::from_millis(commit_phase_duration)).await;
+        // Send the commit phase timeout transaction from 2/3+1 committee nodes.
+        self.commit_phase_timeout(round).await.unwrap();
+
+        // Wait for the reveal phase to end.
+        tokio::time::sleep(Duration::from_millis(reveal_phase_duration)).await;
+        // Send the reveal phase timeout transaction from 2/3+1 committee nodes.
+        self.reveal_phase_timeout(round).await.unwrap();
 
         // Wait for epoch to be incremented across all nodes.
         self.wait_for_epoch_change(new_epoch).await?;
@@ -36,27 +45,51 @@ impl TestNetwork {
     /// This method does not wait for the epoch to be incremented across all nodes, but it does wait
     /// for each of the transactions to be executed.
     pub async fn change_epoch(&self) -> Result<Epoch> {
-        self.change_epoch_with_options(Some(ExecuteTransactionOptions {
-            wait: ExecuteTransactionWait::Receipt,
-            retry: ExecuteTransactionRetry::Default,
-            timeout: Some(Duration::from_secs(10)),
-        }))
-        .await
-    }
-
-    pub async fn change_epoch_with_options(
-        &self,
-        options: Option<ExecuteTransactionOptions>,
-    ) -> Result<Epoch> {
         let epoch = self.node(0).app_query().get_current_epoch();
-        join_all(self.nodes().map(|node| {
-            node.execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch }, options.clone())
-        }))
+        join_all(
+            self.nodes().map(|node| {
+                node.execute_transaction_from_node(UpdateMethod::ChangeEpoch { epoch })
+            }),
+        )
         .await
         .into_iter()
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
         Ok(epoch + 1)
+    }
+
+    pub async fn commit_phase_timeout(
+        &self,
+        round: CommitteeSelectionBeaconRound,
+    ) -> Result<Epoch> {
+        let epoch = self.node(0).app_query().get_current_epoch();
+        join_all(self.nodes().map(|node| {
+            node.execute_transaction_from_node(
+                UpdateMethod::CommitteeSelectionBeaconCommitPhaseTimeout { epoch, round },
+            )
+        }))
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        Ok(epoch)
+    }
+
+    pub async fn reveal_phase_timeout(
+        &self,
+        round: CommitteeSelectionBeaconRound,
+    ) -> Result<Epoch> {
+        let epoch = self.node(0).app_query().get_current_epoch();
+        join_all(self.nodes().map(|node| {
+            node.execute_transaction_from_node(
+                UpdateMethod::CommitteeSelectionBeaconRevealPhaseTimeout { epoch, round },
+            )
+        }))
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        Ok(epoch)
     }
 
     /// Wait for the epoch to match the given epoch across all nodes.

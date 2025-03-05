@@ -28,6 +28,7 @@ use lightning_interfaces::types::{
     ExecutionData,
     ExecutionError,
     Metadata,
+    MintInfo,
     NodeIndex,
     NodeInfo,
     NodePorts,
@@ -136,6 +137,7 @@ pub struct StateExecutor<B: Backend> {
     >,
     pub committee_selection_beacon_non_revealing_node: B::Ref<NodeIndex, ()>,
     pub withdraws: B::Ref<u64, WithdrawInfo>,
+    pub mints: B::Ref<[u8; 32], MintInfo>,
     pub backend: B,
 }
 
@@ -168,6 +170,7 @@ impl<B: Backend> StateExecutor<B> {
             committee_selection_beacon_non_revealing_node: backend
                 .get_table_reference("committee_selection_beacon_non_revealing_node"),
             withdraws: backend.get_table_reference("withdraws"),
+            mints: backend.get_table_reference("mints"),
             backend,
         }
     }
@@ -206,13 +209,26 @@ impl<B: Backend> StateExecutor<B> {
                 token,
                 receiving_address,
             } => self.withdraw(txn.payload.sender, receiving_address, amount, token),
-
+            UpdateMethod::ClearWithdraws { withdraw_id } => {
+                self.clear_withdraws(txn.payload.sender, withdraw_id)
+            },
             UpdateMethod::Mint {
                 amount,
                 token,
                 receiving_address,
-            } => self.mint(txn.payload.sender, receiving_address, amount, token),
-
+                eth_tx_hash,
+                block_number,
+            } => self.mint(
+                txn.payload.sender,
+                receiving_address,
+                amount,
+                token,
+                eth_tx_hash,
+                block_number,
+            ),
+            UpdateMethod::ClearMints { block_number } => {
+                self.clear_mints(txn.payload.sender, block_number)
+            },
             UpdateMethod::Deposit {
                 proof,
                 token,
@@ -263,13 +279,11 @@ impl<B: Backend> StateExecutor<B> {
                 self.committee_selection_beacon_reveal(txn.payload.sender, reveal)
             },
 
-            UpdateMethod::CommitteeSelectionBeaconCommitPhaseTimeout => {
-                self.committee_selection_beacon_commit_phase_timeout(txn.payload.sender)
-            },
+            UpdateMethod::CommitteeSelectionBeaconCommitPhaseTimeout { epoch, round } => self
+                .committee_selection_beacon_commit_phase_timeout(txn.payload.sender, epoch, round),
 
-            UpdateMethod::CommitteeSelectionBeaconRevealPhaseTimeout => {
-                self.committee_selection_beacon_reveal_phase_timeout(txn.payload.sender)
-            },
+            UpdateMethod::CommitteeSelectionBeaconRevealPhaseTimeout { epoch, round } => self
+                .committee_selection_beacon_reveal_phase_timeout(txn.payload.sender, epoch, round),
 
             UpdateMethod::AddService {
                 service,
@@ -500,7 +514,7 @@ impl<B: Backend> StateExecutor<B> {
         };
 
         let withdraw_id = match self.metadata.get(&Metadata::WithdrawId) {
-            Some(Value::WithdrawId(epoch)) => epoch,
+            Some(Value::WithdrawId(withdraw_id)) => withdraw_id,
             _ => 0,
         };
 
@@ -548,12 +562,39 @@ impl<B: Backend> StateExecutor<B> {
     }
 
     // TODO(matthias): temporary until proof of consensus is implemented
+    fn clear_withdraws(&self, sender: TransactionSender, withdraw_id: u64) -> TransactionResponse {
+        // This transaction is only callable by AccountOwners and not nodes
+        // So revert if the sender is a node public key
+        let sender = match self.only_account_owner(sender) {
+            Ok(account) => account,
+            Err(e) => return e,
+        };
+
+        let governance_address = match self.metadata.get(&Metadata::GovernanceAddress) {
+            Some(Value::AccountPublicKey(address)) => address,
+            _ => unreachable!("Governance address is missing from state."),
+        };
+        if sender != governance_address {
+            return TransactionResponse::Revert(ExecutionError::OnlyGovernance);
+        }
+
+        self.withdraws
+            .keys()
+            .filter(|id| id < &withdraw_id)
+            .for_each(|id| self.withdraws.remove(&id));
+
+        TransactionResponse::Success(ExecutionData::None)
+    }
+
+    // TODO(matthias): temporary until proof of consensus is implemented
     fn mint(
         &self,
         sender: TransactionSender,
         reciever: EthAddress,
         amount: HpUfixed<18>,
         token: Tokens,
+        eth_tx_hash: [u8; 32],
+        block_number: u64,
     ) -> TransactionResponse {
         // This transaction is only callable by AccountOwners and not nodes
         // So revert if the sender is a node public key
@@ -572,13 +613,54 @@ impl<B: Backend> StateExecutor<B> {
 
         let mut account = self.account_info.get(&reciever).unwrap_or_default();
 
+        if self.mints.get(&eth_tx_hash).is_some() {
+            return TransactionResponse::Revert(ExecutionError::AlreadyMinted);
+        }
+
+        let mint_info = MintInfo {
+            amount: amount.clone(),
+            token: token.clone(),
+            receiving_address: reciever,
+            eth_tx_hash,
+            block_number,
+        };
+
+        self.mints.set(eth_tx_hash, mint_info);
+
         // Check the token bridged and increment that amount
         match token {
             Tokens::FLK => account.flk_balance += amount,
-            Tokens::USDC => account.bandwidth_balance += TryInto::<u128>::try_into(amount).unwrap(),
+            Tokens::USDC => account.stables_balance += amount.convert_precision::<6>(),
         }
 
         self.account_info.set(reciever, account);
+        TransactionResponse::Success(ExecutionData::None)
+    }
+
+    // TODO(matthias): temporary until proof of consensus is implemented
+    fn clear_mints(&self, sender: TransactionSender, block_number: u64) -> TransactionResponse {
+        // This transaction is only callable by AccountOwners and not nodes
+        // So revert if the sender is a node public key
+        let sender = match self.only_account_owner(sender) {
+            Ok(account) => account,
+            Err(e) => return e,
+        };
+
+        let governance_address = match self.metadata.get(&Metadata::GovernanceAddress) {
+            Some(Value::AccountPublicKey(address)) => address,
+            _ => unreachable!("Governance address is missing from state."),
+        };
+        if sender != governance_address {
+            return TransactionResponse::Revert(ExecutionError::OnlyGovernance);
+        }
+
+        self.mints
+            .as_map()
+            .into_iter()
+            .filter(|(_, val)| val.block_number < block_number)
+            .map(|(key, _)| key)
+            .for_each(|key| self.mints.remove(&key));
+
         TransactionResponse::Success(ExecutionData::None)
     }
 
@@ -1364,7 +1446,6 @@ impl<B: Backend> StateExecutor<B> {
     /// also checks the nonce of the sender and makes sure it is equal to the account nonce + 1,
     /// to prevent replay attacks and enforce ordering. Additionally, it verifies ChainID
     /// with the current value from Metadata Table
-
     pub fn verify_transaction(&self, txn: &mut TransactionRequest) -> Result<(), ExecutionError> {
         self.verify_chain_id(txn)?;
 
@@ -1389,6 +1470,15 @@ impl<B: Backend> StateExecutor<B> {
         }
     }
     fn verify_fleek_transaction(&self, txn: &UpdateRequest) -> Result<(), ExecutionError> {
+        // Check if we already executed the transaction
+        if self
+            .executed_digests
+            .get(&txn.payload.to_digest())
+            .is_some()
+        {
+            return Err(ExecutionError::AlreadyExecutedDigest);
+        }
+
         // Check nonce
         match txn.payload.sender {
             // Todo Sunday(dalton): Clean up this match nesting
@@ -1431,6 +1521,7 @@ impl<B: Backend> StateExecutor<B> {
         if !txn.payload.sender.verify(txn.signature, &digest) {
             return Err(ExecutionError::InvalidSignature);
         }
+
         Ok(())
     }
 
@@ -1662,10 +1753,10 @@ impl<B: Backend> StateExecutor<B> {
 
     /// Whether the node is participating.
     fn is_participating(&self, node_index: &NodeIndex) -> bool {
-        self.node_info.get(node_index).map_or(false, |info| {
+        self.node_info.get(node_index).is_some_and(|info| {
             matches!(
                 info.participation,
-                Participation::OptedIn | Participation::True
+                Participation::OptedOut | Participation::True
             )
         })
     }
